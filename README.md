@@ -1,531 +1,348 @@
-# 🚀 Airflow ML Training Pipeline
+# Vitiscan — Airflow MLOps Pipeline
 
-## The Big Picture
-
-This project demonstrates a **production-ready machine learning training pipeline** that automatically orchestrates the entire lifecycle of training a model in the cloud. Here's the real-world problem it solves:
-
-**Problem:** Training machine learning models requires significant computational resources (GPUs, memory, CPU), but you don't want to keep expensive cloud servers running 24/7. You also want to ensure your code passes all tests before training, and you want to track your experiments automatically.
-
-**Solution:** This Airflow pipeline automates the entire process:
-1. ✅ Waits for your code to pass GitHub CI tests
-2. 🏗️ Spins up a temporary EC2 instance in AWS
-3. 🐳 Sets up the training environment (Docker, MLflow)
-4. 🎯 Runs your ML training job remotely
-5. 🧹 Automatically shuts down the instance (even if training fails!)
-
-This is a **cost-effective, automated, and reliable** way to run expensive ML training jobs without manual intervention.
+Automated MLOps pipeline for the Vitiscan grape leaf disease classification system.
+This repository contains the three Apache Airflow DAGs that handle the full machine learning lifecycle: data monitoring, dataset preparation, and model retraining with automated deployment.
 
 ---
 
-## The Tech Stack
+## Table of Contents
 
-### Core Technologies
-
-- **Apache Airflow** - The workflow orchestration engine. Airflow allows us to define complex workflows as Directed Acyclic Graphs (DAGs), schedule them, monitor them, and handle failures gracefully. Think of it as a "smart task scheduler" that can handle dependencies, retries, and data passing between tasks.
-
-- **Docker & Docker Compose** - Containerization and local development. Docker Compose runs the entire Airflow stack (scheduler, webserver, database, Redis) locally, making it easy to develop and test without complex installations.
-
-- **AWS EC2** - Cloud compute resources. EC2 provides on-demand virtual servers where we run our training. We use it because it's scalable, pay-per-use, and integrates seamlessly with other AWS services.
-
-- **Boto3** - The AWS Python SDK. Boto3 is used to programmatically create, manage, and terminate EC2 instances. It's the bridge between our Python code and AWS services.
-
-- **MLflow** - Machine Learning experiment tracking. MLflow automatically logs your model parameters, metrics, and artifacts. This helps you compare different training runs and reproduce results.
-
-- **GitHub API** - CI/CD integration. We poll GitHub's API to check if your latest code changes have passed all CI tests before starting expensive training.
-
-- **Paramiko** - SSH client library. Paramiko allows us to securely connect to the EC2 instance and execute commands remotely, without needing to manually SSH in.
-
-- **PostgreSQL** - Airflow's metadata database. Stores DAG definitions, task execution history, connections, and variables.
-
-- **Redis** - Message broker for Celery. When using CeleryExecutor (as we do), Redis queues tasks for distributed execution across multiple workers.
-
-- **Ngrok** - Secure tunnel service (optional). Ngrok creates a public HTTPS URL that tunnels to your local Airflow web server. This is useful for accessing your Airflow UI from anywhere on the internet, or for receiving webhooks from external services. The ngrok web interface (for inspecting requests) is available at http://localhost:4040.
+- [Overview](#overview)
+- [Pipeline Architecture](#pipeline-architecture)
+- [DAGs Description](#dags-description)
+  - [dag_monitoring](#dag_monitoring)
+  - [dag_data_ingestion](#dag_data_ingestion)
+  - [dag_retraining](#dag_retraining)
+- [How the DAGs Work Together](#how-the-dags-work-together)
+- [Project Structure](#project-structure)
+- [Prerequisites](#prerequisites)
+- [Environment Variables](#environment-variables)
+- [Setup & Installation](#setup--installation)
+- [Running the DAGs](#running-the-dags)
+- [Infrastructure Overview](#infrastructure-overview)
+- [Disease Classes](#disease-classes)
 
 ---
 
-## Project Architecture
+## Overview
+
+Vitiscan is an AI-powered application that diagnoses grape vine leaf diseases from photographs. A farmer takes a photo of a suspicious leaf and receives an instant diagnosis among 7 disease categories, along with a treatment plan.
+
+This Airflow repository automates the **machine learning lifecycle** — ensuring the model is always trained on the latest labeled data, deployed only when it genuinely improves on the current production model, and continuously monitored for performance degradation.
+
+> **Note:** This pipeline manages data and model lifecycle only.
+> Application code quality and deployment is handled separately by GitHub Actions (see the `Diagnostic-API` repository).
+
+---
+
+## Pipeline Architecture
 
 ```
-Airflow-sample-server/
-│
+Every Monday (scheduled)
+        │
+        ▼
+┌─────────────────────────────────────────────────────┐
+│                   dag_monitoring                    │
+│                                                     │
+│  Trigger 1: New images ≥ 200 in S3 new-images/?     │
+│  Trigger 2: Last training > 60 days ago?            │
+│  Performance check: F1 or Recall < 0.90?            │
+└──────────────┬──────────────────────┬───────────────┘
+               │ YES (data trigger)   │ NO (performance check only)
+               ▼                      ▼
+┌──────────────────────┐     ┌─────────────────────┐
+│  dag_data_ingestion  │     │   Send alert /      │
+│                      │     │   No action needed  │
+│  1. List new images  │     └─────────────────────┘
+│  2. Validate classes │
+│  3. Integrate to S3  │
+│  4. Balance dataset  │
+│  5. Update metadata  │
+└──────────┬───────────┘
+           │ triggers
+           ▼
+┌──────────────────────────────────────────────────────┐
+│                   dag_retraining                     │
+│                                                      │
+│  1. Provision EC2 GPU instance                       │
+│  2. Train ResNet18 on new dataset                    │
+│  3. Compare new vs current model (F1 score)          │
+│     ├── New model better → deploy to pre-production  │
+│     │       ├── Tests pass → deploy to production ✓  │
+│     │       └── Tests fail → rollback                │
+│     └── No improvement → keep current model          │
+│  7. Terminate EC2 instance (always)                  │
+└──────────────────────────────────────────────────────┘
+```
+
+---
+
+## DAGs Description
+
+### dag_monitoring
+
+**Schedule:** Every week (`@weekly`)
+**Trigger:** Automatic — no external trigger required
+
+This is the entry point of the pipeline. It acts as a watchdog that runs weekly and decides whether action is needed.
+
+It checks two independent conditions:
+
+**Retraining triggers** — if either condition is met, `dag_data_ingestion` is triggered:
+- **Volume trigger:** ≥ 200 new labeled images are available in `s3://vitiscanpro-bucket/new-images/`
+- **Delay trigger:** The last model training happened more than 60 days ago
+
+**Performance check** — if no retraining is needed, the model metrics are inspected:
+- Fetches the latest run metrics from MLflow
+- Sends an alert if `test_f1_macro < 0.90` or `test_recall_macro < 0.90`
+
+| Task | Type | Description |
+|---|---|---|
+| `check_retraining_triggers` | BranchPythonOperator | Checks volume and delay triggers |
+| `trigger_ingestion` | TriggerDagRunOperator | Triggers dag_data_ingestion |
+| `check_model_performance` | BranchPythonOperator | Checks F1 and recall thresholds |
+| `send_alert` | PythonOperator | Sends performance alert |
+| `no_action` | EmptyOperator | Terminal state when all metrics are healthy |
+
+---
+
+### dag_data_ingestion
+
+**Schedule:** None — triggered by `dag_monitoring` only
+**Trigger:** `TriggerDagRunOperator` from `dag_monitoring`
+
+Responsible for preparing the training dataset from newly labeled images. It ensures that only valid, well-structured images enter the training pipeline and that the dataset remains balanced across all 7 disease classes.
+
+| Task | Type | Description |
+|---|---|---|
+| `list_new_images` | PythonOperator | Lists all images in `new-images/` on S3 |
+| `validate_images` | PythonOperator | Checks class membership and file extensions |
+| `integrate_images` | PythonOperator | Copies valid images to `datasets/combined/` |
+| `balance_dataset` | PythonOperator | Archives excess images to maintain ≤ 350 per class |
+| `update_metadata` | PythonOperator | Writes updated metadata to `last_training_metadata.json` |
+| `trigger_retraining` | TriggerDagRunOperator | Triggers dag_retraining |
+
+**Validation rules:**
+- Images must be in a subfolder matching one of the 7 INRAE class names
+- Accepted formats: `.jpg`, `.jpeg`, `.png`, `.webp`
+- Images in unknown subfolders are rejected and logged
+
+**Balancing strategy:**
+- Target: **350 images per class**
+- Excess images are moved to `datasets/archived/<class>/` — never permanently deleted
+- Classes with fewer than 350 images trigger a warning; training compensates via weighted sampling
+
+---
+
+### dag_retraining
+
+**Schedule:** None — triggered by `dag_data_ingestion` only
+**Trigger:** `TriggerDagRunOperator` from `dag_data_ingestion`
+
+Manages the complete model retraining and deployment lifecycle. It ensures that the production model is only replaced when a genuinely better model has been validated.
+
+| Task | Type | Description |
+|---|---|---|
+| `provision_ec2` | PythonOperator | Provisions a GPU instance for training |
+| `train_model` | PythonOperator | Trains ResNet18 and logs metrics to MLflow |
+| `evaluate_and_compare` | BranchPythonOperator | Compares new vs current production model |
+| `deploy_to_preprod` | PythonOperator | Deploys new model to pre-production |
+| `run_preprod_tests` | BranchPythonOperator | Runs automated tests against pre-prod API |
+| `deploy_to_prod` | PythonOperator | Deploys validated model to production |
+| `rollback` | PythonOperator | Keeps current model if pre-prod tests fail |
+| `keep_current_model` | EmptyOperator | Terminal state when new model does not improve |
+| `terminate_ec2` | PythonOperator | Terminates EC2 instance (always runs) |
+
+**Deployment decision logic:**
+```
+New model F1 ≥ Current model F1 + 0.01 ?
+    YES → deploy to pre-production → run tests
+              Tests pass? YES → deploy to production ✓
+              Tests pass? NO  → rollback (keep current model)
+    NO  → keep current model (no deployment)
+```
+
+The `terminate_ec2` task uses `trigger_rule="all_done"` — it always runs regardless of upstream task failures, preventing unnecessary cloud costs.
+
+---
+
+## How the DAGs Work Together
+
+The three DAGs form a **cascade pipeline** where each DAG is responsible for one distinct stage and triggers the next one:
+
+```
+dag_monitoring  ──triggers──▶  dag_data_ingestion  ──triggers──▶  dag_retraining
+  (weekly)                        (on demand)                        (on demand)
+```
+
+**Key design principles:**
+- Each DAG has `schedule=None` except `dag_monitoring`, meaning they never run autonomously
+- DAGs communicate via XCom for intra-DAG task data sharing
+- DAGs communicate via S3 metadata (`last_training_metadata.json`) for inter-DAG information
+- `terminate_ec2` always runs (`trigger_rule="all_done"`) to prevent cloud cost leakage
+
+**Separation from GitHub Actions:**
+This Airflow pipeline manages the **data and model lifecycle**. It does not interact with GitHub Actions, which independently handles **code quality** (unit tests, integration tests, and API deployment on code push). Their only shared point is HuggingFace Spaces, where both systems deploy to the same Diagnostic API — GitHub Actions deploys the code, Airflow deploys the model.
+
+---
+
+## Project Structure
+
+```
+vitiscan-airflow/
 ├── dags/
-│   └── ml_training_pipeline.py    # The main DAG definition - your workflow logic lives here
-│
-├── config/
-│   └── airflow.cfg                 # Airflow configuration file (optional custom settings)
-│
-├── logs/                           # Task execution logs (auto-generated by Airflow)
-│   └── dag_id=github_ec2_ml_training/
-│       └── run_id=.../             # Each DAG run creates a new log directory
-│
-├── plugins/                        # Custom Airflow plugins (currently empty, but ready for extensions)
-│
-├── docker-compose.yaml             # Defines all Airflow services (scheduler, webserver, DB, etc.)
-│
-├── .env                            # Environment variables (AWS credentials, GitHub tokens, etc.)
-│                                  # ⚠️ Never commit this file! (It's in .gitignore)
-│
-└── .gitignore                      # Tells Git which files to ignore (logs, .env, __pycache__)
-```
-
-### Key Folders Explained
-
-- **`/dags`** - This is where Airflow looks for your workflow definitions. Any Python file in this directory that defines a `DAG` object will be automatically discovered and loaded into the Airflow UI.
-
-- **`/config`** - Optional Airflow configuration overrides. The `airflow.cfg` file here allows you to customize Airflow settings without modifying the Docker image.
-
-- **`/logs`** - Execution logs for every task run. Airflow automatically creates a directory structure here: `dag_id/run_id/task_id/attempt.log`. This is invaluable for debugging failed tasks.
-
-- **`/plugins`** - For custom Airflow operators, hooks, sensors, or executors. Currently empty, but this is where you'd add reusable components if you build more DAGs.
-
-- **`docker-compose.yaml`** - The orchestration file that defines all services needed to run Airflow:
-  - `airflow-scheduler` - Parses DAGs and schedules tasks
-  - `airflow-apiserver` - Serves the web UI (port 8080)
-  - `airflow-worker` - Executes tasks (using Celery)
-  - `postgres` - Metadata database
-  - `redis` - Message broker
-  - `airflow-init` - One-time initialization service
-
----
-
-## The Code Walkthrough
-
-### Flow 1: The Complete Training Pipeline (Main Flow)
-
-This is the end-to-end journey from "code pushed to GitHub" to "model trained and instance cleaned up."
-
-#### Step-by-Step Data Flow:
-
-1. **`wait_for_github_ci()`** (Task 1)
-   - **What it does:** Polls GitHub's API every 30 seconds to check if the latest CI run on the `main` branch has passed.
-   - **Why it matters:** We don't want to waste money training on broken code!
-   - **Key code:** Uses `requests.get()` to hit `https://api.github.com/repos/{repo}/actions/runs` with authentication headers.
-   - **Output:** Returns `True` when CI passes, or raises an exception if it fails or times out.
-
-2. **`create_ec2_instance`** (Task 2)
-   - **What it does:** Uses Airflow's `EC2CreateInstanceOperator` to launch a new EC2 instance in AWS.
-   - **Key configuration:**
-     - `UserData`: A base64-encoded bash script that runs when the instance boots. This script installs Docker, MLflow, and Python dependencies automatically.
-     - `InstanceType`: The size of the instance (e.g., `t3.small`).
-     - `SecurityGroupIds`: Firewall rules that allow SSH access.
-   - **Output:** Returns a list of instance IDs (XCom) that subsequent tasks can use.
-
-3. **`check_ec2_status()`** (Task 3)
-   - **What it does:** Waits for AWS's "status checks" to pass. This ensures the instance is fully booted and the network is ready.
-   - **How it works:** Uses Boto3's `waiter` pattern, which polls AWS until the instance is ready.
-   - **Why it's needed:** Even though the instance is "running," it might not be ready for SSH yet.
-   - **Output:** Returns the validated instance ID.
-
-4. **`get_public_ip()`** (Task 4)
-   - **What it does:** Retrieves the public IP address of the EC2 instance.
-   - **Why it's needed:** We need the IP to SSH into the instance.
-   - **Output:** Returns the public IP as a string.
-
-5. **`run_training_via_ssh()`** (Task 5)
-   - **What it does:** 
-     - Connects to the EC2 instance via SSH using Paramiko
-     - Waits for MLflow to be fully installed (checks with `python3 -c "import mlflow"`)
-     - Executes the training command: `mlflow run https://github.com/{repo} --version main --build-image`
-   - **Key details:**
-     - Uses retry logic (10 attempts) to handle SSH connection delays
-     - Sets environment variables (MLflow tracking URI, AWS credentials) before running training
-     - Streams output in real-time so you can see training progress in Airflow logs
-   - **Output:** Training results are logged to MLflow (not returned to Airflow).
-
-6. **`terminate_ec2_instance`** (Task 6)
-   - **What it does:** Shuts down and terminates the EC2 instance to stop incurring costs.
-   - **Critical feature:** Uses `TriggerRule.ALL_DONE`, meaning it runs **even if training failed**. This prevents orphaned instances from costing money.
-   - **How it gets the instance ID:** Uses XCom to pull the instance ID from Task 2: `{{ task_instance.xcom_pull(task_ids='create_ec2_instance')[0] }}`
-
-#### Visual Flow Diagram:
-
-```mermaid
-graph TD
-    A[wait_for_github_ci] -->|CI Passed| B[create_ec2_instance]
-    B -->|Instance IDs| C[check_ec2_status]
-    C -->|Validated Instance ID| D[get_public_ip]
-    D -->|Public IP| E[run_training_via_ssh]
-    E -->|Training Complete| F[terminate_ec2_instance]
-    
-    style A fill:#e1f5ff
-    style B fill:#fff4e1
-    style C fill:#fff4e1
-    style D fill:#fff4e1
-    style E fill:#e8f5e9
-    style F fill:#ffebee
-```
-
-### Flow 2: Data Passing Between Tasks (XCom)
-
-Airflow tasks can pass data to each other using **XCom** (cross-communication). This is how the instance ID flows from Task 2 → Task 3 → Task 4.
-
-**How it works:**
-- **Standard Operators** (like `EC2CreateInstanceOperator`) automatically push their return value to XCom.
-- **TaskFlow Tasks** (decorated with `@task`) can receive XCom values as function parameters.
-- **Example:** `check_ec2_status(create_ec2.output)` - The `.output` property is an XComArg that Airflow resolves at runtime.
-
-**Key Code Pattern:**
-```python
-# Task 2 returns instance_ids (automatically pushed to XCom)
-create_ec2 = EC2CreateInstanceOperator(...)
-
-# Task 3 receives it as a parameter
-@task
-def check_ec2_status(instance_ids):  # instance_ids comes from XCom!
-    instance_id = instance_ids[0]
-    # ... do work ...
-    return instance_id  # This is also pushed to XCom
-
-# Task 4 receives Task 3's output
-@task
-def get_public_ip(instance_id):  # instance_id comes from Task 3's XCom!
-    # ... do work ...
-    return public_ip
-```
-
-### Flow 3: EC2 Instance Lifecycle Management
-
-This flow shows how we ensure the instance is properly set up and cleaned up.
-
-1. **Creation with User Data Script:**
-   - When EC2 boots, it runs the `USER_DATA_SCRIPT` (embedded in the DAG).
-   - This script installs Docker, MLflow, Python packages, and configures permissions.
-   - It creates a marker file (`/tmp/airflow_ready`) when done.
-
-2. **Status Verification:**
-   - `check_ec2_status()` ensures AWS's health checks pass.
-   - `run_training_via_ssh()` has additional checks: it waits for MLflow to be importable before running training.
-
-3. **Cleanup Guarantee:**
-   - `terminate_ec2_instance` uses `TriggerRule.ALL_DONE` to ensure it runs regardless of upstream task success or failure.
-   - This prevents cost leaks from failed runs.
-
----
-
-## Key Learning Moments
-
-### 1. **Task Dependencies and Data Flow** (`ml_training_pipeline.py`, lines 293-311)
-
-**What to study:** Notice how tasks are connected both implicitly (through data dependencies) and explicitly (using the `>>` operator).
-
-```python
-# Implicit dependency: public_ip depends on validated_instance_id
-public_ip = get_public_ip(validated_instance_id)
-
-# Explicit dependency: ensures the graph renders correctly in UI
-github_signal >> create_ec2
-create_ec2 >> validated_instance_id >> public_ip >> training_output >> terminate_ec2
-```
-
-**Why it's important:** 
-- **Implicit dependencies** (function parameters) are the "real" dependencies - Airflow won't run a task until its inputs are ready.
-- **Explicit dependencies** (`>>`) help with UI visualization and make the code more readable.
-
-**Learning takeaway:** In Airflow, you can mix both patterns. The data flow (XCom) is what actually enforces execution order, but explicit chaining helps with clarity.
-
-### 2. **Error Handling and Resource Cleanup** (`ml_training_pipeline.py`, lines 282-287)
-
-**What to study:** The `terminate_ec2_instance` task uses `TriggerRule.ALL_DONE` instead of the default `ALL_SUCCESS`.
-
-```python
-terminate_ec2 = EC2TerminateInstanceOperator(
-    task_id="terminate_ec2_instance",
-    instance_ids="{{ task_instance.xcom_pull(task_ids='create_ec2_instance')[0] }}",
-    trigger_rule=TriggerRule.ALL_DONE,  # ← Key difference!
-)
-```
-
-**Why it's important:**
-- **Default behavior:** Tasks only run if all upstream tasks succeed.
-- **With `ALL_DONE`:** The task runs regardless of success or failure.
-- **Real-world impact:** If training fails, the instance still gets terminated, preventing cost leaks.
-
-**Learning takeaway:** Always think about cleanup tasks when working with cloud resources. Use `TriggerRule.ALL_DONE` for cleanup operations that must run even on failure.
-
-### 3. **Retry Logic and Resilience** (`ml_training_pipeline.py`, lines 204-210, 217-228)
-
-**What to study:** Multiple retry patterns throughout the code:
-
-```python
-# Retry SSH connection
-for i in range(10):
-    try:
-        ssh.connect(public_ip, username='ubuntu', pkey=ssh_key, timeout=10)
-        break
-    except Exception as e:
-        print(f"Waiting for SSH... ({e})")
-        time.sleep(10)
-
-# Retry MLflow import check
-wait_cmd = """
-for i in {1..60}; do
-    if python3 -c "import mlflow" > /dev/null 2>&1; then
-        echo "✅ Python found MLflow!"
-        exit 0
-    fi
-    sleep 5
-done
-"""
-```
-
-**Why it's important:**
-- Cloud resources take time to become ready (eventual consistency).
-- Network operations can fail transiently.
-- User data scripts run asynchronously - the instance might be "running" but not fully configured.
-
-**Learning takeaway:** When working with cloud APIs and remote systems, always implement retry logic with exponential backoff or polling. Don't assume resources are immediately available.
-
----
-
-## Setup & Run
-
-### Prerequisites
-
-- **Docker Desktop** installed and running
-- **AWS Account** with EC2 permissions
-- **GitHub Personal Access Token** with `repo` and `actions:read` scopes
-- **SSH Key Pair** created in AWS EC2
-
-### Step 1: Clone the Repository
-
-```bash
-git clone <repository-url>
-cd Airflow-sample-server
-```
-
-### Step 1a: Create AWS SSH Key Pair
-
-You need an SSH key pair to securely connect to your EC2 instances. Here's how to create one in AWS:
-
-**Option 1: Using AWS Console (Recommended for beginners)**
-
-1. Log in to the [AWS Console](https://console.aws.amazon.com/)
-2. Navigate to **EC2** → **Key Pairs** (under "Network & Security" in the left sidebar)
-3. Click **"Create key pair"**
-4. Configure:
-   - **Name:** Choose a descriptive name (e.g., `airflow-training-key`)
-   - **Key pair type:** Select **RSA**
-   - **Private key file format:** Select **.pem** (for Linux/Mac) or **.ppk** (for Windows with PuTTY)
-5. Click **"Create key pair"**
-6. **⚠️ Important:** The private key file will automatically download. Save it securely - you'll need it for the `SSH_PRIVATE_KEY_CONTENT` in your `.env` file!
-7. Note the **Key pair name** - you'll use this for `KEY_PAIR_NAME` in your `.env` file
-
-**Option 2: Using AWS CLI**
-
-```bash
-# Create the key pair and save the private key
-aws ec2 create-key-pair \
-    --key-name airflow-training-key \
-    --query 'KeyMaterial' \
-    --output text > airflow-training-key.pem
-
-# Set proper permissions (Linux/Mac only)
-chmod 400 airflow-training-key.pem
-```
-
-**📝 Note:** The key pair name you choose will be used as the `KEY_PAIR_NAME` value in your `.env` file. The private key content (from the downloaded `.pem` file) will be used for `SSH_PRIVATE_KEY_CONTENT`.
-
-### Step 1b: Get GitHub Personal Access Token
-
-You need a GitHub Personal Access Token (PAT) to authenticate with GitHub's API and check CI status. Here's how to create one:
-
-1. Log in to [GitHub](https://github.com/)
-2. Click your profile picture (top right) → **Settings**
-3. Scroll down to **Developer settings** (left sidebar, at the bottom)
-4. Click **Personal access tokens** → **Tokens (classic)**
-5. Click **"Generate new token"** → **"Generate new token (classic)"**
-6. Configure the token:
-   - **Note:** Give it a descriptive name (e.g., "Airflow CI Checker")
-   - **Expiration:** Choose an expiration date (or "No expiration" for development)
-   - **Scopes:** Check the following boxes:
-     - ✅ `repo` (Full control of private repositories)
-     - ✅ `actions:read` (Read GitHub Actions data)
-7. Click **"Generate token"** at the bottom
-8. **⚠️ Important:** Copy the token immediately! GitHub will only show it once. It looks like: `ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`
-9. Save this token - you'll use it for `GITHUB_PAT` in your `.env` file
-
-**🔒 Security Tip:** Never commit your token to Git. Always use environment variables or `.env` files (which are in `.gitignore`).
-
-### Step 1c: Get Ngrok Auth Token (Optional)
-
-Ngrok allows you to expose your local Airflow UI to the internet securely. This is useful if you want to access Airflow from your phone, share it with teammates, or receive webhooks. If you don't need remote access, you can skip this step.
-
-1. Go to [ngrok.com](https://ngrok.com/) and sign up for a free account (or log in if you already have one)
-2. After logging in, navigate to [Your Authtoken](https://dashboard.ngrok.com/get-started/your-authtoken)
-3. You'll see your authtoken displayed (it looks like: `2abc123def456ghi789jkl012mno345pqr678stu901vwx234yz`)
-4. **Copy the authtoken** - you'll use it for `NGROK_AUTHTOKEN` in your `.env` file
-
-**💡 What Ngrok does:**
-- Creates a secure HTTPS tunnel from the internet to your local Airflow server
-- Provides a public URL (e.g., `https://abc123.ngrok.io`) that forwards to `localhost:8080`
-- Includes a web dashboard at `http://localhost:4040` to inspect requests and see the public URL
-
-**📝 Note:** The free tier of Ngrok is perfect for development and testing. For production use, consider upgrading to a paid plan for custom domains and more features.
-
-### Step 2: Create Environment File
-
-Create a `.env` file in the project root with the following variables:
-
-**💡 Tip:** You should have completed Step 1a (SSH key pair) and Step 1b (GitHub token) before filling in the values below.
-
-```bash
-# GitHub Configuration
-GITHUB_REPO=your-username/your-repo-name
-GITHUB_PAT=your_github_personal_access_token  # From Step 1b
-
-# AWS Configuration
-AWS_ACCESS_KEY_ID=your_aws_access_key
-AWS_SECRET_ACCESS_KEY=your_aws_secret_key
-AWS_DEFAULT_REGION=eu-west-3  # or your preferred region
-KEY_PAIR_NAME=your-ec2-key-pair-name  # From Step 1a (e.g., "airflow-training-key")
-AMI_ID=ami-00ac45f3035ff009e  # Ubuntu AMI (or your custom AMI)
-SECURITY_GROUP_ID=sg-xxxxxxxxx  # Security group allowing SSH (port 22)
-INSTANCE_TYPE=t3.small
-
-# MLflow Configuration
-MLFLOW_TRACKING_URI=http://your-mlflow-server:5000
-MLFLOW_EXPERIMENT_NAME=california_housing
-
-# SSH Private Key (for connecting to EC2)
-# From Step 1a: Open the downloaded .pem file and paste its entire contents here
-# Make sure to include the BEGIN and END lines!
-SSH_PRIVATE_KEY_CONTENT="-----BEGIN RSA PRIVATE KEY-----
-...
------END RSA PRIVATE KEY-----"
-
-# Airflow Configuration (optional)
-AIRFLOW_UID=$(id -u)  # On Linux/Mac, this sets the user ID
-
-# Ngrok Configuration (optional - for exposing Airflow UI publicly)
-# From Step 1c: Paste your ngrok authtoken here (skip if you don't need remote access)
-NGROK_AUTHTOKEN=your_ngrok_authtoken_here
-```
-
-**⚠️ Security Note:** Never commit the `.env` file! It's already in `.gitignore`.
-
-**📡 About Ngrok:** If you completed Step 1c and added the `NGROK_AUTHTOKEN` to your `.env` file, Ngrok will automatically start when you run `docker-compose up`. You can view the ngrok dashboard at http://localhost:4040 to see the public URL and inspect requests. If you didn't set up Ngrok, the service simply won't start (which is fine for local-only access).
-
-### Step 3: Set Airflow User ID (Linux/Mac)
-
-```bash
-export AIRFLOW_UID=$(id -u)
-```
-
-On Windows, you can skip this or set it manually in the `.env` file.
-
-### Step 4: Initialize Airflow
-
-This creates the database schema and an admin user:
-
-```bash
-docker-compose up airflow-init
-```
-
-Wait for the message: `"Airflow is ready!"`
-
-### Step 5: Start Airflow Services
-
-```bash
-docker-compose up -d
-```
-
-This starts all services in the background:
-- Airflow webserver (UI) at http://localhost:8080
-- Airflow scheduler
-- PostgreSQL database
-- Redis broker
-- Worker processes
-- Ngrok (if `NGROK_AUTHTOKEN` is set in `.env`) - exposes Airflow UI publicly
-
-### Step 6: Access the Airflow UI
-
-**Local Access:**
-1. Open your browser to **http://localhost:8080**
-2. Login with:
-   - **Username:** `airflow`
-   - **Password:** `airflow`
-
-**Remote Access (if Ngrok is configured):**
-1. Visit **http://localhost:4040** to see the Ngrok web interface
-2. Copy the public HTTPS URL (e.g., `https://abc123.ngrok.io`)
-3. Use that URL to access Airflow from anywhere on the internet
-4. The same login credentials apply (`airflow` / `airflow`)
-
-### Step 7: Enable and Run the DAG
-
-1. In the Airflow UI, find the DAG named `github_ec2_ml_training`
-2. Toggle it from "Paused" (⏸️) to "Unpaused" (▶️)
-3. Click the "Play" button (▶️) to trigger a manual run, or wait for the schedule
-
-### Step 8: Monitor Execution
-
-- Click on the DAG name to see the graph view
-- Click on individual tasks to see logs
-- Green = success, Red = failure, Yellow = running
-
-### Step 9: Stop Airflow (When Done)
-
-```bash
-docker-compose down
-```
-
-To also remove volumes (clears database):
-
-```bash
-docker-compose down -v
+│   ├── dag_monitoring.py        # Weekly watchdog DAG
+│   ├── dag_data_ingestion.py    # Dataset preparation DAG
+│   └── dag_retraining.py        # Model training and deployment DAG
+├── logs/                        # Airflow task logs (auto-generated)
+├── plugins/                     # Custom Airflow plugins (empty)
+├── airflow.cfg                  # Airflow configuration
+├── docker-compose.yml           # Local development setup
+├── requirements.txt             # Python dependencies
+└── README.md
 ```
 
 ---
 
-## Troubleshooting
+## Prerequisites
 
-### DAG Not Appearing in UI
-
-- Check that `ml_training_pipeline.py` is in the `/dags` folder
-- Look for import errors in the DAG processor logs: `docker-compose logs airflow-dag-processor`
-- Ensure Python syntax is valid
-
-### EC2 Instance Creation Fails
-
-- Verify AWS credentials in `.env` are correct
-- Check that your IAM user has `ec2:RunInstances` permission
-- Verify the AMI ID exists in your region
-- Ensure the security group allows SSH (port 22) from your IP
-
-### SSH Connection Timeout
-
-- Wait longer - EC2 instances can take 2-3 minutes to be SSH-ready
-- Check security group rules allow SSH from your IP (or 0.0.0.0/0 for testing)
-- Verify the SSH private key matches the key pair name in AWS
-
-### Training Fails on EC2
-
-- Check the task logs in Airflow UI for detailed error messages
-- SSH into the instance manually and check `/var/log/user-data-debug.log`
-- Verify MLflow tracking URI is accessible from the EC2 instance
-- Ensure your GitHub repo contains a valid `MLproject` file for MLflow
+- Python 3.11+
+- Apache Airflow 2.8+
+- Docker and Docker Compose (for local development)
+- AWS account with access to S3 and EC2
+- MLflow tracking server running on HuggingFace Spaces
+- HuggingFace account with a Space for the Diagnostic API
 
 ---
 
-## Next Steps
+## Environment Variables
 
-- **Customize the training:** Modify the `mlflow run` command in `run_training_via_ssh()` to pass parameters or use different entry points
-- **Add monitoring:** Integrate with CloudWatch or Datadog to track instance metrics
-- **Optimize costs:** Use Spot Instances for non-critical training jobs
-- **Add notifications:** Send Slack/email alerts when training completes or fails
-- **Scale up:** Modify the DAG to support parallel training runs on multiple instances
+The following environment variables must be configured in your Airflow environment (via Airflow Variables or environment secrets):
 
----
-
-## Resources
-
-- [Apache Airflow Documentation](https://airflow.apache.org/docs/)
-- [MLflow Documentation](https://mlflow.org/docs/latest/index.html)
-- [Boto3 EC2 Documentation](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/ec2.html)
-- [GitHub Actions API](https://docs.github.com/en/rest/actions/workflows)
+| Variable | Description | Example |
+|---|---|---|
+| `AWS_ACCESS_KEY_ID` | AWS credentials for S3 access | `AKIA...` |
+| `AWS_SECRET_ACCESS_KEY` | AWS secret key | `...` |
+| `AWS_DEFAULT_REGION` | AWS region | `eu-west-3` |
+| `MLFLOW_TRACKING_URI` | MLflow server URL | `https://mouniat-vitiscanpro-hf.hf.space` |
+| `HF_TOKEN` | HuggingFace API token for deployment | `hf_...` |
 
 ---
 
-**Happy Learning! 🎓**
+## Setup & Installation
 
-If you have questions or find issues, feel free to open an issue or contribute improvements!
+**1. Clone the repository**
+```bash
+git clone https://github.com/mouniat/vitiscan-airflow.git
+cd vitiscan-airflow
+```
+
+**2. Install dependencies**
+```bash
+pip install apache-airflow==2.8.0
+pip install -r requirements.txt
+```
+
+**3. Initialize the Airflow database**
+```bash
+airflow db init
+airflow users create \
+    --username admin \
+    --password admin \
+    --firstname Admin \
+    --lastname User \
+    --role Admin \
+    --email admin@vitiscan.com
+```
+
+**4. Set environment variables**
+```bash
+export AWS_ACCESS_KEY_ID=your_key
+export AWS_SECRET_ACCESS_KEY=your_secret
+export AWS_DEFAULT_REGION=eu-west-3
+export MLFLOW_TRACKING_URI=https://mouniat-vitiscanpro-hf.hf.space
+export HF_TOKEN=your_hf_token
+```
+
+**5. Copy DAGs to the Airflow DAGs folder**
+```bash
+cp dags/*.py /opt/airflow/dags/
+```
+
+**6. Start the Airflow scheduler and webserver**
+```bash
+airflow scheduler &
+airflow webserver --port 8080
+```
+
+Then open `http://localhost:8080` and unpause the `dag_monitoring` DAG.
+
+---
+
+## Running the DAGs
+
+**Automatic execution:**
+Once `dag_monitoring` is unpaused in the Airflow UI, it runs automatically every week. The downstream DAGs are triggered automatically when conditions are met.
+
+**Manual trigger (for testing):**
+```bash
+# Trigger the full pipeline manually
+airflow dags trigger dag_monitoring
+
+# Trigger ingestion directly (skipping monitoring checks)
+airflow dags trigger dag_data_ingestion
+
+# Trigger retraining directly (skipping ingestion)
+airflow dags trigger dag_retraining
+```
+
+**Checking DAG status:**
+```bash
+airflow dags list
+airflow dags list-runs --dag-id dag_monitoring
+```
+
+---
+
+## Infrastructure Overview
+
+| Component | Tool | Purpose |
+|---|---|---|
+| Pipeline orchestration | Apache Airflow | Schedules and runs the 3 DAGs |
+| Data storage | AWS S3 (`vitiscanpro-bucket`) | Stores images and dataset metadata |
+| Model training | AWS EC2 (`p3.2xlarge`) | GPU instance for ResNet18 training |
+| Experiment tracking | MLflow (HuggingFace Spaces) | Logs metrics, parameters and model artifacts |
+| Model serving | HuggingFace Spaces | Hosts the Diagnostic API |
+| CI/CD (code) | GitHub Actions | Tests and deploys API code on push |
+
+**S3 bucket structure:**
+```
+vitiscanpro-bucket/
+├── new-images/
+│   └── <class_name>/          ← new labeled images uploaded by experts
+├── datasets/
+│   ├── combined/
+│   │   ├── <class_name>/      ← current training dataset
+│   │   └── last_training_metadata.json
+│   └── archived/
+│       └── <class_name>/      ← excess images (never deleted)
+└── mlflow-artifacts/          ← model weights and artifacts
+```
+
+---
+
+## Disease Classes
+
+The pipeline handles exactly **7 INRAE grape disease classes**:
+
+| Class (scientific name) | Common name |
+|---|---|
+| `colomerus_vitis` | Grape erineum mite |
+| `elsinoe_ampelina` | Grape anthracnose |
+| `erysiphe_necator` | Powdery mildew |
+| `guignardia_bidwellii` | Black rot |
+| `healthy` | Healthy leaf |
+| `phaeomoniella_chlamydospora` | Esca disease |
+| `plasmopara_viticola` | Downy mildew |
+
+Images uploaded to `new-images/` must be placed in a subfolder named exactly after one of these classes. Any other subfolder name will be rejected during the validation step.

@@ -226,6 +226,9 @@ The following environment variables must be configured in your Airflow environme
 | `AWS_DEFAULT_REGION` | AWS region | `eu-west-3` |
 | `MLFLOW_TRACKING_URI` | MLflow server URL | `https://mouniat-vitiscanpro-hf.hf.space` |
 | `HF_TOKEN` | HuggingFace API token for deployment | `hf_...` |
+| `fernet_key`| For Airflow config file | `ABC123...` |
+
+How to get a fernet keey : `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`
 
 ---
 

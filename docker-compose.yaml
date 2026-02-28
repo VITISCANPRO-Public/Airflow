@@ -16,64 +16,65 @@
 # under the License.
 #
 
+# ══════════════════════════════════════════════════════════════════════════════
+# VITISCAN AIRFLOW — DOCKER COMPOSE CONFIGURATION
+# ══════════════════════════════════════════════════════════════════════════════
+#
 # Basic Airflow cluster configuration for CeleryExecutor with Redis and PostgreSQL.
 #
-# WARNING: This configuration is for local development. Do not use it in a production deployment.
+# WARNING: This configuration is for local development. Do not use it in a 
+# production deployment without additional security hardening.
 #
-# This configuration supports basic configuration using environment variables or an .env file
-# The following variables are supported:
+# SETUP:
+#   1. Copy .env.template to .env and fill in your values
+#   2. Run: docker-compose up -d
+#   3. Access Airflow UI at: http://localhost:8081
 #
-# AIRFLOW_IMAGE_NAME           - Docker image name used to run Airflow.
-#                                Default: apache/airflow:3.1.3
-# AIRFLOW_UID                  - User ID in Airflow containers
-#                                Default: 50000
-# AIRFLOW_PROJ_DIR             - Base path to which all the files will be volumed.
-#                                Default: .
-# Those configurations are useful mostly in case of standalone testing/running Airflow in test/try-out mode
-#
-# _AIRFLOW_WWW_USER_USERNAME   - Username for the administrator account (if requested).
-#                                Default: airflow
-# _AIRFLOW_WWW_USER_PASSWORD   - Password for the administrator account (if requested).
-#                                Default: airflow
-# _PIP_ADDITIONAL_REQUIREMENTS - Additional PIP requirements to add when starting all containers.
-#                                Use this option ONLY for quick checks. Installing requirements at container
-#                                startup is done EVERY TIME the service is started.
-#                                A better way is to build a custom image or extend the official image
-#                                as described in https://airflow.apache.org/docs/docker-stack/build.html.
-#                                Default: ''
-#
-# Feel free to modify this file to suit your needs.
+# ══════════════════════════════════════════════════════════════════════════════
+
 ---
 x-airflow-common:
   &airflow-common
-  # In order to add custom dependencies or upgrade provider distributions you can use your extended image.
-  # Comment the image line, place your Dockerfile in the directory where you placed the docker-compose.yaml
-  # and uncomment the "build" line below, Then run `docker-compose build` to build the images.
+  # Build custom image with our requirements.txt
+  # To use the official image instead, comment "build" and uncomment "image"
   # image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:3.1.3}
   build: .
   env_file:
     - ${ENV_FILE_PATH:-.env}
   environment:
     &airflow-common-env
+    # ── Core Airflow Configuration ────────────────────────────────────────────
     AIRFLOW__CORE__EXECUTOR: CeleryExecutor
     AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
-    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
-    AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
-    AIRFLOW__CORE__FERNET_KEY: ''
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    
+    # ── Database Configuration ────────────────────────────────────────────────
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    
+    # ── Celery Configuration ──────────────────────────────────────────────────
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
+    AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+    
+    # ── Security Configuration ────────────────────────────────────────────────
+    # FIX: Reference environment variable instead of hardcoding empty string
+    # BEFORE: AIRFLOW__CORE__FERNET_KEY: ''
+    # AFTER: Read from .env file
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY}
+    
+    # ── API Server Configuration ──────────────────────────────────────────────
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-apiserver:8080/execution/'
-    # yamllint disable rule:line-length
-    # Use simple http server on scheduler for health checks
-    # See https://airflow.apache.org/docs/apache-airflow/stable/administration-and-deployment/logging-monitoring/check-health.html#scheduler-health-check-server
-    # yamllint enable rule:line-length
+    
+    # ── Scheduler Health Check ────────────────────────────────────────────────
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
-    # WARNING: Use _PIP_ADDITIONAL_REQUIREMENTS option ONLY for a quick checks
-    # for other purpose (development, test and especially production usage) build/extend Airflow image.
-    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
-    # The following line can be used to set a custom config file, stored in the local config folder
+    
+    # ── Custom Airflow Config File ────────────────────────────────────────────
     AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
+    
+    # ── Additional PIP Requirements ───────────────────────────────────────────
+    # WARNING: Use this ONLY for quick checks. For production, build a custom image.
+    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
+    
   volumes:
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
     - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
@@ -88,6 +89,10 @@ x-airflow-common:
       condition: service_healthy
 
 services:
+  # ════════════════════════════════════════════════════════════════════════════
+  # DATABASE SERVICES
+  # ════════════════════════════════════════════════════════════════════════════
+  
   postgres:
     image: postgres:16
     environment:
@@ -104,7 +109,7 @@ services:
     restart: always
 
   redis:
-    # Redis is limited to 7.2-bookworm due to licencing change
+    # Redis is limited to 7.2-bookworm due to licensing change
     # https://redis.io/blog/redis-adopts-dual-source-available-licensing/
     image: redis:7.2-bookworm
     expose:
@@ -116,6 +121,10 @@ services:
       retries: 50
       start_period: 30s
     restart: always
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # AIRFLOW CORE SERVICES
+  # ════════════════════════════════════════════════════════════════════════════
 
   airflow-apiserver:
     <<: *airflow-common
@@ -168,7 +177,6 @@ services:
     <<: *airflow-common
     command: celery worker
     healthcheck:
-      # yamllint disable rule:line-length
       test:
         - "CMD-SHELL"
         - 'celery --app airflow.providers.celery.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}" || celery --app airflow.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}"'
@@ -204,10 +212,13 @@ services:
       airflow-init:
         condition: service_completed_successfully
 
+  # ════════════════════════════════════════════════════════════════════════════
+  # INITIALIZATION SERVICE
+  # ════════════════════════════════════════════════════════════════════════════
+
   airflow-init:
     <<: *airflow-common
     entrypoint: /bin/bash
-    # yamllint disable rule:line-length
     command:
       - -c
       - |
@@ -285,8 +296,6 @@ services:
         echo "Files in shared volumes:"
         echo
         ls -la /opt/airflow/{logs,dags,plugins,config}
-
-    # yamllint enable rule:line-length
     environment:
       <<: *airflow-common-env
       _AIRFLOW_DB_MIGRATE: 'true'
@@ -296,6 +305,10 @@ services:
       _PIP_ADDITIONAL_REQUIREMENTS: ''
     user: "0:0"
 
+  # ════════════════════════════════════════════════════════════════════════════
+  # DEBUG & MONITORING SERVICES
+  # ════════════════════════════════════════════════════════════════════════════
+
   airflow-cli:
     <<: *airflow-common
     profiles:
@@ -303,7 +316,6 @@ services:
     environment:
       <<: *airflow-common-env
       CONNECTION_CHECK_MAX_COUNT: "0"
-    # Workaround for entrypoint issue. See: https://github.com/apache/airflow/issues/16252
     command:
       - bash
       - -c
@@ -311,9 +323,8 @@ services:
     depends_on:
       <<: *airflow-common-depends-on
 
-  # You can enable flower by adding "--profile flower" option e.g. docker-compose --profile flower up
-  # or by explicitly targeted on the command line e.g. docker-compose up flower.
-  # See: https://docs.docker.com/compose/profiles/
+  # Celery Flower - monitoring for Celery workers
+  # Enable with: docker-compose --profile flower up
   flower:
     <<: *airflow-common
     command: celery flower
@@ -333,6 +344,7 @@ services:
       airflow-init:
         condition: service_completed_successfully
   
+  # Ngrok - expose Airflow UI for development/demo
   ngrok:
     image: ngrok/ngrok:latest
     restart: unless-stopped

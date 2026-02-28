@@ -107,22 +107,23 @@ jobs:
 
       # Step 4: Initialize Airflow (creates config and database)
       # We use SQLite for CI (no need for PostgreSQL)
+      # IMPORTANT: SQLite requires ABSOLUTE path, not relative
       - name: Initialize Airflow
         run: |
-          export AIRFLOW_HOME=$(pwd)
-          export AIRFLOW__CORE__DAGS_FOLDER=$(pwd)/dags
+          export AIRFLOW_HOME=${{ github.workspace }}
+          export AIRFLOW__CORE__DAGS_FOLDER=${{ github.workspace }}/dags
           export AIRFLOW__CORE__LOAD_EXAMPLES=False
-          export AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=sqlite:///airflow.db
+          export AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=sqlite:///${{ github.workspace }}/airflow.db
           airflow db init
 
       # Step 5: Validate DAGs by listing them
       # If any DAG has errors, this command fails and shows the error
       - name: Validate DAG syntax
         run: |
-          export AIRFLOW_HOME=$(pwd)
-          export AIRFLOW__CORE__DAGS_FOLDER=$(pwd)/dags
+          export AIRFLOW_HOME=${{ github.workspace }}
+          export AIRFLOW__CORE__DAGS_FOLDER=${{ github.workspace }}/dags
           export AIRFLOW__CORE__LOAD_EXAMPLES=False
-          export AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=sqlite:///airflow.db
+          export AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=sqlite:///${{ github.workspace }}/airflow.db
           
           echo "Validating DAG files..."
           airflow dags list
@@ -137,10 +138,10 @@ jobs:
       # Step 6: Show DAG structure (optional, for visibility)
       - name: Show DAG tasks
         run: |
-          export AIRFLOW_HOME=$(pwd)
-          export AIRFLOW__CORE__DAGS_FOLDER=$(pwd)/dags
+          export AIRFLOW_HOME=${{ github.workspace }}
+          export AIRFLOW__CORE__DAGS_FOLDER=${{ github.workspace }}/dags
           export AIRFLOW__CORE__LOAD_EXAMPLES=False
-          export AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=sqlite:///airflow.db
+          export AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=sqlite:///${{ github.workspace }}/airflow.db
           
           echo "DAG: dag_monitoring"
           airflow tasks list dag_monitoring --tree || true

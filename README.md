@@ -15,6 +15,7 @@ This repository contains three Apache Airflow DAGs that handle the full machine 
   - [dag_retraining](#dag_retraining)
 - [How the DAGs Work Together](#how-the-dags-work-together)
 - [Project Structure](#project-structure)
+- [CI/CD Pipeline](#cicd-pipeline)
 - [Prerequisites](#prerequisites)
 - [Environment Variables](#environment-variables)
 - [Setup & Installation](#setup--installation)
@@ -198,8 +199,11 @@ This Airflow pipeline manages the **data and model lifecycle**. It does not inte
 
 ```
 vitiscan-airflow/
+├── .github/
+│   └── workflows/
+│       └── ci.yaml              # CI/CD pipeline
 ├── dags/
-│   ├── config.py                # Centralized configuration (env vars + defaults)
+│   ├── config.py                # Centralized configuration
 │   ├── dag_monitoring.py        # Weekly watchdog DAG
 │   ├── dag_data_ingestion.py    # Dataset preparation DAG
 │   └── dag_retraining.py        # Model training and deployment DAG
@@ -212,6 +216,92 @@ vitiscan-airflow/
 ├── Dockerfile                   # Custom Airflow image with dependencies
 ├── requirements.txt             # Python dependencies
 └── README.md
+```
+
+---
+
+## CI/CD Pipeline
+
+This repository includes a GitHub Actions CI/CD pipeline that runs automatically on every push and pull request. It ensures code quality before changes reach production.
+
+### Pipeline Overview
+
+```
+git push
+    │
+    ▼
+┌─────────────────────────────────────┐
+│  Job 1: Lint                        │
+│                                     │
+│  • Checks Python syntax errors      │
+│  • Detects undefined variables      │
+│  • Finds unused imports             │
+│  • Enforces code style              │
+│                                     │
+│  Tool: ruff (fast Python linter)    │
+└──────────────┬──────────────────────┘
+               │ Pass
+               ▼
+┌─────────────────────────────────────┐
+│  Job 2: Validate DAGs               │
+│                                     │
+│  • Installs Airflow                 │
+│  • Parses all DAG files             │
+│  • Detects import errors            │
+│  • Validates DAG configuration      │
+│                                     │
+│  Command: airflow dags list         │
+└──────────────┬──────────────────────┘
+               │ Pass
+               ▼
+         Merge allowed
+```
+
+### What is Linting?
+
+**Linting** is automatic code analysis that detects errors without executing the code:
+
+| Error Type | Example | Without Linting |
+|------------|---------|-----------------|
+| Syntax errors | `if x = 5:` instead of `if x == 5:` | Crash at runtime |
+| Undefined variables | `print(user_name)` when variable is `username` | Crash at runtime |
+| Unused imports | `import pandas` but never used | Bloated code |
+| Style issues | 500-character lines, inconsistent indentation | Hard to read |
+
+Think of it as a **spell-checker for code** — it catches typos and mistakes before they cause problems.
+
+### Viewing CI Results
+
+After pushing code, go to your GitHub repository → **Actions** tab:
+
+**Success:**
+```
+ CI Pipeline
+   ├── Lint Python Code (32s)
+   └── Validate Airflow DAGs (1m 12s)
+```
+
+**Failure:**
+```
+ CI Pipeline
+   ├── Lint Python Code (8s)
+   │      └── Error: dags/dag_monitoring.py:42 — undefined name 'mlflwo'
+   └── Validate Airflow DAGs (skipped)
+```
+
+### Running Lint Locally
+
+Before pushing, you can run the linter locally to catch errors early:
+
+```bash
+# Install ruff
+pip install ruff
+
+# Run linter on DAGs
+ruff check dags/
+
+# Auto-fix simple issues
+ruff check dags/ --fix
 ```
 
 ---
@@ -366,7 +456,7 @@ airflow dags list-runs --dag-id dag_monitoring
 | Experiment tracking | MLflow (HuggingFace Spaces) | Logs metrics and manages model versions |
 | Model registry | MLflow Model Registry | Manages model stages (Staging/Production) |
 | Model serving | HuggingFace Spaces | Hosts the Diagnostic API |
-| CI/CD (code) | GitHub Actions | Tests and deploys API code on push |
+| CI/CD (code) | GitHub Actions | Lints code and validates DAGs on push |
 
 **S3 bucket structure:**
 ```
@@ -418,11 +508,13 @@ All pipeline configuration is centralized in `dags/config.py`. Values can be ove
 
 See `dags/config.py` for the complete list.
 
+---
+
 ## Author
 
 **Mounia Tonazzini** — Agronomist Engineer & Data Scientist and Data Engineer
 
 - HuggingFace: [huggingface.co/MouniaT](https://huggingface.co/MouniaT)
-- LinkedIn: [www.linkedin.com/in/mounia-tonazzini](www.linkedin.com/in/mounia-tonazzini)
+- LinkedIn: [www.linkedin.com/in/mounia-tonazzini](https://www.linkedin.com/in/mounia-tonazzini)
 - GitHub: [github/Mounia-Agronomist-Datascientist](https://github.com/Mounia-Agronomist-Datascientist)
-- Email : mounia.tonazzini@gmail.com
+- Email: mounia.tonazzini@gmail.com

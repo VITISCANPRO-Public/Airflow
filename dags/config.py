@@ -14,9 +14,7 @@ Default values are used if environment variables are not defined.
 Usage:
     from config import S3_BUCKET, MIN_NEW_IMAGES, DRIFT_THRESHOLD
 """
-
 import os
-
 
 # AWS S3 CONFIGURATION ═══════════════════════════════════════════════
 

@@ -38,7 +38,7 @@ Usage in DAG:
     # Generate and analyze drift report
     report, drift_detected = generate_drift_report(reference_features, current_features)
 """
-
+# Standard library
 import io
 import json
 import logging
@@ -46,6 +46,7 @@ import os
 import tempfile
 from datetime import datetime
 
+# Third-party
 import numpy as np
 import pandas as pd
 from PIL import Image

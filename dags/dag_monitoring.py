@@ -39,7 +39,6 @@ trigger_ingestion              check_data_drift (Evidently)
 # ══════════════════════════════════════════════════════════════════════════════
 # IMPORTS
 # ══════════════════════════════════════════════════════════════════════════════
-
 # Standard library
 import json
 import logging
@@ -48,8 +47,6 @@ from datetime import datetime, timedelta
 # Third-party libraries
 import boto3
 import mlflow
-
-# Airflow imports
 from airflow import DAG
 from airflow.operators.empty import EmptyOperator
 from airflow.operators.python import BranchPythonOperator, PythonOperator

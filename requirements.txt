@@ -1,8 +1,30 @@
-# Cloud & storage
+# ══════════════════════════════════════════════════════════════════════════════
+# Vitiscan Airflow — Python Dependencies
+# ══════════════════════════════════════════════════════════════════════════════
+
+# AWS SDK for S3 operations
 boto3==1.34.0
 
-# ML tracking
-mlflow==2.13.0
+# MLflow for model registry and experiment tracking
+mlflow==2.22.0
 
-# HTTP requests (to call the APIs in the retraining dag)
+# HTTP client for API calls (pre-prod tests)
 requests==2.31.0
+
+# ══════════════════════════════════════════════════════════════════════════════
+# EVIDENTLY — ML Monitoring & Drift Detection
+# ══════════════════════════════════════════════════════════════════════════════
+# Evidently is used to detect:
+# - Data drift: are new images statistically different from training data?
+# - Prediction drift: has the distribution of predictions changed?
+# - Data quality: are there issues with incoming data?
+
+evidently==0.4.33
+
+# Evidently dependencies (explicitly pinned for reproducibility)
+pandas==2.2.0
+numpy==1.26.4
+scikit-learn==1.4.0
+
+# Image processing for feature extraction
+Pillow==10.2.0

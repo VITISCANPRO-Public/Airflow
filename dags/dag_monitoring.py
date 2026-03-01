@@ -1,28 +1,39 @@
 """
-dag_monitoring.py — Weekly monitoring DAG.
+dag_monitoring.py — Weekly monitoring DAG with Evidently drift detection.
 
 This DAG is the entry point of the Vitiscan MLOps pipeline.
-It runs automatically every week and checks two conditions:
+It runs automatically every week and performs three types of checks:
 
 1. RETRAINING TRIGGERS:
    - Volume: >= MIN_NEW_IMAGES new labeled images on S3
    - Delay: >= MAX_DAYS_WITHOUT_RETRAINING days since last training
    → If either condition is met, triggers dag_data_ingestion
 
-2. PERFORMANCE CHECK:
-   - If no trigger is activated, checks production model metrics
+2. DATA DRIFT DETECTION (NEW - Evidently):
+   - Extracts features from new images
+   - Compares with reference features (from training set)
+   - Generates drift report and uploads to S3
+   - Alerts if drift exceeds threshold
+
+3. PERFORMANCE CHECK:
+   - If no retraining trigger, checks production model metrics
    - If F1 < F1_THRESHOLD or Recall < RECALL_THRESHOLD → sends alert
 
 Flow architecture:
     check_retraining_triggers
             │
-    ┌───────┴───────┐
-    ▼               ▼
-trigger_ingestion   check_model_performance
-                           │
-                    ┌──────┴──────┐
-                    ▼             ▼
-                send_alert    no_action
+    ┌───────┴───────────────────────────┐
+    │                                   │
+    ▼                                   ▼
+trigger_ingestion              check_data_drift (Evidently)
+                                        │
+                                ┌───────┴───────┐
+                                ▼               ▼
+                        send_drift_alert   check_model_performance
+                                                   │
+                                           ┌──────┴──────┐
+                                           ▼             ▼
+                                       send_alert    no_action
 """
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -37,6 +48,7 @@ from datetime import datetime, timedelta
 # Third-party libraries
 import boto3
 import mlflow
+import pandas as pd
 
 # Airflow imports
 from airflow import DAG
@@ -46,17 +58,31 @@ from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
 # Local imports
 from config import (
+    DRIFT_DETECTION_ENABLED,
+    DRIFT_THRESHOLD,
     F1_THRESHOLD,
     MAX_DAYS_WITHOUT_RETRAINING,
+    MIN_IMAGES_FOR_DRIFT,
     MIN_NEW_IMAGES,
     MLFLOW_EXPERIMENT_NAME,
     MLFLOW_MODEL_NAME,
     MLFLOW_TRACKING_URI,
+    MONITORED_FEATURES,
     RECALL_THRESHOLD,
     S3_BUCKET,
+    S3_DRIFT_REPORTS_DIR,
     S3_METADATA_KEY,
     S3_NEW_IMAGES_DIR,
+    S3_REFERENCE_FEATURES_KEY,
     VALID_EXTENSIONS,
+)
+
+from utils.drift_detection import (
+    check_drift_detected,
+    extract_image_features,
+    generate_drift_report,
+    load_reference_features,
+    upload_report_to_s3,
 )
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -87,9 +113,7 @@ def list_s3_images(s3_client, bucket: str, prefix: str) -> list[str]:
     """
     List ALL images in an S3 prefix, with pagination.
 
-    FIX: This function uses a paginator to handle the case where there are
-    more than 1000 objects. The S3 list_objects_v2 API returns max 1000
-    objects per call. Without pagination, images would be silently lost.
+    Uses a paginator to handle >1000 objects (S3 API limit per call).
 
     Args:
         s3_client: boto3 S3 client
@@ -126,7 +150,7 @@ def check_retraining_triggers(**context) -> str:
 
     Returns:
         'trigger_ingestion' if either criterion is met
-        'check_model_performance' otherwise
+        'check_data_drift' otherwise (proceed to drift analysis)
     """
     s3 = boto3.client("s3")
 
@@ -144,6 +168,7 @@ def check_retraining_triggers(**context) -> str:
             "→ triggering ingestion"
         )
         context["ti"].xcom_push(key="trigger_reason", value="volume")
+        context["ti"].xcom_push(key="new_images", value=new_images)
         return "trigger_ingestion"
 
     # ── Criterion #2: Days since last training ────────────────────────────────
@@ -176,16 +201,143 @@ def check_retraining_triggers(**context) -> str:
     except Exception as e:
         logger.error(f"Error reading metadata: {e}")
 
-    logger.info("No retraining trigger reached → checking model performance only")
+    # Store new images for drift analysis
+    context["ti"].xcom_push(key="new_images", value=new_images)
+
+    logger.info("No retraining trigger reached → proceeding to drift analysis")
+    return "check_data_drift"
+
+
+def check_data_drift(**context) -> str:
+    """
+    Analyze data drift using Evidently.
+
+    Compares features from new images against the reference dataset
+    (features extracted from the training set).
+
+    Returns:
+        'send_drift_alert' if significant drift detected
+        'check_model_performance' otherwise
+    """
+    # Check if drift detection is enabled
+    if not DRIFT_DETECTION_ENABLED:
+        logger.info("Drift detection is disabled → skipping")
+        return "check_model_performance"
+
+    s3 = boto3.client("s3")
+    ti = context["ti"]
+
+    # Get list of new images from previous task
+    new_images = ti.xcom_pull(key="new_images", task_ids="check_retraining_triggers")
+
+    if not new_images:
+        new_images = list_s3_images(s3, S3_BUCKET, S3_NEW_IMAGES_DIR)
+
+    # Check minimum sample size
+    if len(new_images) < MIN_IMAGES_FOR_DRIFT:
+        logger.info(
+            f"Not enough images for drift analysis: "
+            f"{len(new_images)} < {MIN_IMAGES_FOR_DRIFT}"
+        )
+        return "check_model_performance"
+
+    # ── Load reference features ───────────────────────────────────────────────
+    reference_df = load_reference_features(s3, S3_BUCKET, S3_REFERENCE_FEATURES_KEY)
+
+    if reference_df.empty:
+        logger.warning(
+            "No reference features found. "
+            "Run scripts/generate_reference_features.py first. "
+            "Skipping drift analysis."
+        )
+        return "check_model_performance"
+
+    # ── Extract features from new images ──────────────────────────────────────
+    logger.info(f"Extracting features from {len(new_images)} new images...")
+    current_df = extract_image_features(new_images, s3_client=s3)
+
+    if current_df.empty:
+        logger.warning("Failed to extract features from new images")
+        return "check_model_performance"
+
+    # ── Generate drift report ─────────────────────────────────────────────────
+    logger.info("Generating Evidently drift report...")
+    report, results = generate_drift_report(
+        reference_data=reference_df,
+        current_data=current_df,
+        feature_columns=MONITORED_FEATURES,
+    )
+
+    # ── Upload report to S3 ───────────────────────────────────────────────────
+    report_key = upload_report_to_s3(
+        report=report,
+        results=results,
+        s3_client=s3,
+        bucket=S3_BUCKET,
+        prefix=S3_DRIFT_REPORTS_DIR,
+    )
+
+    # ── Check if drift exceeds threshold ──────────────────────────────────────
+    drift_exceeded, message = check_drift_detected(results, DRIFT_THRESHOLD)
+
+    logger.info(message)
+
+    # Push results for downstream tasks
+    ti.xcom_push(key="drift_results", value=results)
+    ti.xcom_push(key="drift_report_key", value=report_key)
+    ti.xcom_push(key="drift_exceeded", value=drift_exceeded)
+
+    if drift_exceeded:
+        return "send_drift_alert"
+
     return "check_model_performance"
+
+
+def send_drift_alert(**context) -> None:
+    """
+    Send an alert when significant data drift is detected.
+
+    This indicates that new images are statistically different from
+    the training data, which could lead to degraded model performance.
+    """
+    ti = context["ti"]
+    results = ti.xcom_pull(key="drift_results", task_ids="check_data_drift")
+    report_key = ti.xcom_pull(key="drift_report_key", task_ids="check_data_drift")
+
+    drift_share = results.get("drift_share", 0)
+    drifted_features = results.get("drifted_features", [])
+
+    message = (
+        "VITISCAN DATA DRIFT ALERT\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Significant data drift detected in new images:\n"
+        f"  Drift share    : {drift_share:.1%} (threshold: {DRIFT_THRESHOLD:.1%})\n"
+        f"  Drifted features: {', '.join(drifted_features)}\n"
+        f"  Reference size : {results.get('n_reference', 'N/A')} images\n"
+        f"  Current size   : {results.get('n_current', 'N/A')} images\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Recommended actions:\n"
+        "  1. Review the drift report on S3\n"
+        "  2. Investigate the cause (lighting, camera, season?)\n"
+        "  3. Consider updating the reference dataset\n"
+        "  4. May need to retrain the model\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Full report: s3://{S3_BUCKET}/{report_key}"
+    )
+
+    logger.warning(message)
+
+    # TODO: In production, add:
+    # - send_email(to="mlops-team@vitiscan.com", subject="Drift Alert", body=message)
+    # - slack_webhook.post(message)
 
 
 def check_model_performance(**context) -> str:
     """
     Check metrics of the model currently in production.
 
-    FIX: Uses MLflow Model Registry to identify the production model
-    instead of assuming it's the most recent run.
+    Uses MLflow Model Registry to identify the production model
+    and fetch its metrics.
 
     Returns:
         'send_alert' if metrics are below thresholds
@@ -258,20 +410,13 @@ def check_model_performance(**context) -> str:
 def send_alert(**context) -> None:
     """
     Send an alert when model performance is below thresholds.
-
-    In production, this function should:
-    - Send an email via SMTP
-    - Post a Slack message
-    - Create a Jira/PagerDuty ticket
-
-    For now, it simply logs the alert.
     """
     ti = context["ti"]
     f1_score = ti.xcom_pull(key="f1_score", task_ids="check_model_performance")
     recall = ti.xcom_pull(key="recall", task_ids="check_model_performance")
 
     message = (
-        "🚨 VITISCAN MODEL ALERT 🚨\n"
+        "VITISCAN MODEL PERFORMANCE ALERT\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "Model performance below acceptable thresholds:\n"
         f"  F1 Macro  : {f1_score:.3f} (threshold: {F1_THRESHOLD})\n"
@@ -290,18 +435,20 @@ def send_alert(**context) -> None:
 
 with DAG(
     dag_id="dag_monitoring",
-    description="Weekly monitoring: checks retraining triggers and model perf",
+    description="Weekly monitoring: triggers, drift detection, performance check",
     default_args=default_args,
     start_date=datetime(2025, 1, 1),
     schedule="@weekly",
     catchup=False,
-    tags=["vitiscan", "monitoring"],
+    tags=["vitiscan", "monitoring", "evidently"],
 ) as dag:
+
+    # ── Task Definitions ──────────────────────────────────────────────────────
 
     check_triggers = BranchPythonOperator(
         task_id="check_retraining_triggers",
         python_callable=check_retraining_triggers,
-        doc_md="Check if retraining should be triggered.",
+        doc_md="Check if retraining should be triggered (volume or delay).",
     )
 
     trigger_ingestion = TriggerDagRunOperator(
@@ -312,16 +459,28 @@ with DAG(
         doc_md="Triggers the data ingestion DAG.",
     )
 
+    drift_check = BranchPythonOperator(
+        task_id="check_data_drift",
+        python_callable=check_data_drift,
+        doc_md="Analyze data drift using Evidently.",
+    )
+
+    drift_alert = PythonOperator(
+        task_id="send_drift_alert",
+        python_callable=send_drift_alert,
+        doc_md="Send alert when significant drift is detected.",
+    )
+
     check_performance = BranchPythonOperator(
         task_id="check_model_performance",
         python_callable=check_model_performance,
-        doc_md="Check production model metrics.",
+        doc_md="Check production model metrics via MLflow.",
     )
 
-    alert = PythonOperator(
+    perf_alert = PythonOperator(
         task_id="send_alert",
         python_callable=send_alert,
-        doc_md="Sends an alert (logs for now, email/Slack in production).",
+        doc_md="Send alert when model performance is below thresholds.",
     )
 
     no_action = EmptyOperator(
@@ -330,6 +489,19 @@ with DAG(
     )
 
     # ── Dependencies ──────────────────────────────────────────────────────────
+    # Flow:
+    #   check_triggers
+    #       ├── trigger_ingestion (if volume/delay trigger)
+    #       └── check_data_drift (if no trigger)
+    #               ├── send_drift_alert (if drift detected)
+    #               └── check_model_performance (if no drift)
+    #                       ├── send_alert (if perf issue)
+    #                       └── no_action (if all good)
 
     check_triggers >> trigger_ingestion
-    check_triggers >> check_performance >> [alert, no_action]
+    check_triggers >> drift_check
+
+    drift_check >> drift_alert
+    drift_check >> check_performance
+
+    check_performance >> [perf_alert, no_action]

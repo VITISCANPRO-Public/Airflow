@@ -47,6 +47,7 @@ from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
 # Local imports
 from config import (
+    S3_ARCHIVED_DIR,
     S3_BUCKET,
     S3_COMBINED_DIR,
     S3_METADATA_KEY,
@@ -339,7 +340,7 @@ def balance_dataset(**context) -> None:
             archived_count = 0
             for img_key in to_archive:
                 filename = img_key.split("/")[-1]
-                archive_key = f"datasets/archived/{cls}/{filename}"
+                archive_key = f"{S3_ARCHIVED_DIR}{cls}/{filename}"
 
                 try:
                     s3.copy_object(

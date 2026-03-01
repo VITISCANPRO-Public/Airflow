@@ -396,7 +396,7 @@ This Airflow pipeline manages the **data and model lifecycle**. It does not inte
 vitiscan-airflow/
 ├── .github/
 │   └── workflows/
-│       └── ci.yaml                       # CI/CD pipeline
+│       └── ci.yml                       # CI/CD pipeline
 ├── dags/
 │   ├── config.py                         # Centralized configuration
 │   ├── dag_monitoring.py                 # Weekly watchdog DAG (+ drift detection)
@@ -744,7 +744,7 @@ vitiscanpro-bucket/
 
 ## Disease Classes
 
-The pipeline handles exactly ** the grape disease classes**:
+The pipeline handles exactly ** 7 classes**:
 
 | Class (scientific name) | Common name |
 |---|---|

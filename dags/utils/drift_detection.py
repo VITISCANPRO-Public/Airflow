@@ -53,6 +53,7 @@ from evidently import ColumnMapping
 from evidently.metric_preset import DataDriftPreset, DataQualityPreset
 from evidently.report import Report
 from PIL import Image
+from PIL import ImageStat
 
 # ══════════════════════════════════════════════════════════════════════════════
 # LOGGER
@@ -117,6 +118,10 @@ def extract_single_image_features(image_path: str, s3_client=None) -> dict:
         # Convert to numpy array for calculations
         img_array = np.array(img, dtype=np.float32) / 255.0  # Normalize to 0-1
 
+        # Calculate saturation
+        hsv_img = img.convert("HSV")
+        hsv_array = np.array(hsv_img, dtype=np.float32) / 255.0
+
         # Extract features
         features = {
             # Overall brightness (mean of all pixels)
@@ -133,6 +138,7 @@ def extract_single_image_features(image_path: str, s3_client=None) -> dict:
             "red_mean": float(np.mean(img_array[:, :, 0])),
             "green_mean": float(np.mean(img_array[:, :, 1])),
             "blue_mean": float(np.mean(img_array[:, :, 2])),
+            "saturation": float(np.mean(hsv_array[:,:,1])),
         }
 
         return features

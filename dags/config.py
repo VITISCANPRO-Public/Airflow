@@ -124,6 +124,7 @@ MONITORED_FEATURES = [
     "red_mean",        # Mean of red channel
     "green_mean",      # Mean of green channel
     "blue_mean",       # Mean of blue channel
+    "saturation",      
 ]
 
 
@@ -161,13 +162,6 @@ EC2_AMI_ID = os.environ.get("VITISCAN_EC2_AMI_ID", "ami-0abcdef1234567890")
 # AWS region for EC2 instance
 EC2_REGION = os.environ.get("AWS_DEFAULT_REGION", "eu-west-3")
 
-
-# API ENDPOINTS ═══════════════════════════════════════════════════════════════
-
-API_DIAGNO_URL = os.getenv(
-    "VITISCAN_API_DIAGNO_URL",
-    "https://mouniat-vitiscanpro-diagno-api.hf.space"
-)
 
 # DISPLAY CONFIGURATION SUMMARY (for debugging) ════════════════════════════════
 

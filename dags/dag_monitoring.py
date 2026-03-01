@@ -48,7 +48,6 @@ from datetime import datetime, timedelta
 # Third-party libraries
 import boto3
 import mlflow
-import pandas as pd
 
 # Airflow imports
 from airflow import DAG

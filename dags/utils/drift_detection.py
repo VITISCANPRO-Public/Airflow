@@ -45,13 +45,10 @@ import logging
 import os
 import tempfile
 from datetime import datetime
-from typing import Optional
 
-import boto3
 import numpy as np
 import pandas as pd
 from PIL import Image
-
 from evidently import ColumnMapping
 from evidently.metric_preset import DataDriftPreset, DataQualityPreset
 from evidently.report import Report
@@ -334,7 +331,7 @@ def check_drift_detected(
 
     if drift_share >= drift_threshold:
         message = (
-            f"⚠️ DRIFT ALERT: {drift_share:.1%} of features show drift "
+            f"DRIFT ALERT: {drift_share:.1%} of features show drift "
             f"(threshold: {drift_threshold:.1%}). "
             f"Drifted features: {', '.join(drifted_features)}"
         )

@@ -3,6 +3,10 @@
 Automated MLOps pipeline for the Vitiscan grape leaf disease classification system.
 This repository contains three Apache Airflow DAGs that handle the full machine learning lifecycle: data monitoring, dataset preparation, and model retraining with automated deployment.
 
+[![Airflow](https://img.shields.io/badge/Airflow-3.1.3-red)](https://airflow.apache.org)
+[![Evidently](https://img.shields.io/badge/Evidently-0.4.33-teal)](https://evidentlyai.com)
+[![Python](https://img.shields.io/badge/Python-3.11-blue)](https://python.org)
+
 ---
 
 ## Table of Contents
@@ -13,6 +17,12 @@ This repository contains three Apache Airflow DAGs that handle the full machine 
   - [dag_monitoring](#dag_monitoring)
   - [dag_data_ingestion](#dag_data_ingestion)
   - [dag_retraining](#dag_retraining)
+- [Data Drift Detection](#data-drift-detection)
+  - [Why Drift Detection Matters](#why-drift-detection-matters)
+  - [How It Works](#how-it-works)
+  - [Extracted Features](#extracted-features)
+  - [Generated Reports](#generated-reports)
+  - [Interpreting Results](#interpreting-results)
 - [How the DAGs Work Together](#how-the-dags-work-together)
 - [Project Structure](#project-structure)
 - [CI/CD Pipeline](#cicd-pipeline)
@@ -22,6 +32,8 @@ This repository contains three Apache Airflow DAGs that handle the full machine 
 - [Running the DAGs](#running-the-dags)
 - [Infrastructure Overview](#infrastructure-overview)
 - [Disease Classes](#disease-classes)
+- [Configuration](#configuration)
+- [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -34,6 +46,15 @@ This Airflow repository automates the **machine learning lifecycle** — ensurin
 > **Note:** This pipeline manages data and model lifecycle only.
 > Application code quality and deployment is handled separately by GitHub Actions (see the `Diagnostic-API` repository).
 
+### Key Features
+
+| Feature | Tool | Description |
+|---------|------|-------------|
+| **Retraining triggers** | Airflow | Automatic retraining when ≥200 new images or 60+ days elapsed |
+| **Data drift detection** | Evidently | Statistical comparison of new images vs training dataset |
+| **Performance monitoring** | MLflow | Alert when F1 or Recall drops below 0.90 |
+| **Safe deployment** | MLflow Registry | Pre-production testing before promoting to Production |
+
 ---
 
 ## Pipeline Architecture
@@ -42,39 +63,64 @@ This Airflow repository automates the **machine learning lifecycle** — ensurin
 Every Monday (scheduled)
         │
         ▼
-┌─────────────────────────────────────────────────────┐
-│                   dag_monitoring                    │
-│                                                     │
-│  Trigger 1: New images ≥ 200 in S3 new-images/?     │
-│  Trigger 2: Last training > 60 days ago?            │
-│  Performance check: F1 or Recall < 0.90?            │
-└──────────────┬──────────────────────┬───────────────┘
-               │ YES (data trigger)   │ NO (performance check only)
-               ▼                      ▼
-┌──────────────────────┐     ┌─────────────────────┐
-│  dag_data_ingestion  │     │   Send alert /      │
-│                      │     │   No action needed  │
-│  1. List new images  │     └─────────────────────┘
-│  2. Validate classes │
-│  3. Integrate to S3  │
-│  4. Balance dataset  │
-│  5. Update metadata  │
-└──────────┬───────────┘
-           │ triggers
-           ▼
-┌──────────────────────────────────────────────────────┐
-│                   dag_retraining                     │
-│                                                      │
-│  1. Provision EC2 GPU instance                       │
-│  2. Train ResNet18 on new dataset                    │
-│  3. Register model in MLflow Model Registry          │
-│  4. Compare new vs production model (F1 score)       │
-│     ├── New model better → deploy to pre-production  │
-│     │       ├── Tests pass → promote to Production   │
-│     │       └── Tests fail → rollback                │
-│     └── No improvement → keep current model          │
-│  5. Terminate EC2 instance (always)                  │
-└──────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│                            dag_monitoring                                │
+│                                                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐     │
+│  │  RETRAINING TRIGGERS                                            │     │
+│  │                                                                 │     │
+│  │  Trigger 1: New images ≥ 200 in S3 new-images/?                 │     │
+│  │  Trigger 2: Last training > 60 days ago?                        │     │
+│  └──────────────────────────┬──────────────────────────────────────┘     │
+│                             │                                            │
+│              ┌──────────────┴──────────────┐                             │
+│              │ YES                         │ NO                          │
+│              ▼                             ▼                             │
+│     trigger_ingestion              ┌───────────────────────────────┐     │
+│              │                     │  DATA DRIFT DETECTION         │     │
+│              │                     │  (Evidently)                  │     │
+│              │                     │                               │     │
+│              │                     │  1. Extract features from     │     │
+│              │                     │     new images (brightness,   │     │
+│              │                     │     contrast, colors, etc.)   │     │
+│              │                     │  2. Compare vs reference      │     │
+│              │                     │     (training dataset)        │     │
+│              │                     │  3. Statistical tests         │     │
+│              │                     └───────────────┬───────────────┘     │
+│              │                                     │                     │
+│              │                     ┌───────────────┴───────────────┐     │
+│              │                     │ Drift > 30%?                  │     │
+│              │                     ▼                               ▼     │
+│              │              send_drift_alert          check_performance  │
+│              │                                              │            │
+│              │                                     ┌────────┴────────┐   │
+│              │                                     ▼                 ▼   │
+│              │                              send_perf_alert     no_action│
+└──────────────┼───────────────────────────────────────────────────────────┘
+               │
+               ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│                          dag_data_ingestion                              │
+│                                                                          │
+│  1. List new images         4. Balance dataset (≤350 per class)          │
+│  2. Validate classes        5. Update metadata                           │
+│  3. Integrate to S3         6. Trigger retraining                        │
+└──────────────────────────────────────┬───────────────────────────────────┘
+                                       │
+                                       ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│                            dag_retraining                                │
+│                                                                          │
+│  1. Provision EC2 GPU instance                                           │
+│  2. Train ResNet18 on new dataset                                        │
+│  3. Register model in MLflow Model Registry                              │
+│  4. Compare new vs production model (F1 score)                           │
+│     ├── New model better → deploy to pre-production                      │
+│     │       ├── Tests pass → promote to Production                       │
+│     │       └── Tests fail → rollback                                    │
+│     └── No improvement → keep current model                              │
+│  5. Terminate EC2 instance (always)                                      │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -84,27 +130,46 @@ Every Monday (scheduled)
 ### dag_monitoring
 
 **Schedule:** Every week (`@weekly`)  
-**Trigger:** Automatic — no external trigger required
+**Trigger:** Automatic — no external trigger required  
+**Tags:** `monitoring`, `evidently`
 
 This is the entry point of the pipeline. It acts as a watchdog that runs weekly and decides whether action is needed.
 
-It checks two independent conditions:
+**Three independent checks are performed:**
 
-**Retraining triggers** — if either condition is met, `dag_data_ingestion` is triggered:
-- **Volume trigger:** ≥ 200 new labeled images are available in `s3://vitiscanpro-bucket/new-images/`
-- **Delay trigger:** The last model training happened more than 60 days ago
-
-**Performance check** — if no retraining is needed, the model metrics are inspected:
-- Fetches the Production model metrics from MLflow Model Registry
-- Sends an alert if `test_f1_macro < 0.90` or `test_recall_macro < 0.90`
+| Check | Condition | Action |
+|-------|-----------|--------|
+| **Volume trigger** | ≥ 200 new images in `new-images/` | → Trigger `dag_data_ingestion` |
+| **Delay trigger** | Last training > 60 days ago | → Trigger `dag_data_ingestion` |
+| **Data drift** | > 30% of features drifted (Evidently) | → Send drift alert |
+| **Performance** | F1 < 0.90 or Recall < 0.90 | → Send performance alert |
 
 | Task | Type | Description |
 |---|---|---|
 | `check_retraining_triggers` | BranchPythonOperator | Checks volume and delay triggers |
 | `trigger_ingestion` | TriggerDagRunOperator | Triggers dag_data_ingestion |
+| `check_data_drift` | BranchPythonOperator | Runs Evidently drift analysis |
+| `send_drift_alert` | PythonOperator | Sends drift alert with report link |
 | `check_model_performance` | BranchPythonOperator | Checks F1 and recall thresholds |
-| `send_alert` | PythonOperator | Sends performance alert |
+| `send_perf_alert` | PythonOperator | Sends performance alert |
 | `no_action` | EmptyOperator | Terminal state when all metrics are healthy |
+
+**Task graph:**
+```
+check_retraining_triggers
+        │
+        ├─────────────────────┐
+        ▼                     ▼
+trigger_ingestion      check_data_drift
+                              │
+                       ┌──────┴──────┐
+                       ▼             ▼
+               send_drift_alert   check_model_performance
+                                        │
+                                 ┌──────┴──────┐
+                                 ▼             ▼
+                          send_perf_alert   no_action
+```
 
 ---
 
@@ -125,7 +190,7 @@ Responsible for preparing the training dataset from newly labeled images. It ens
 | `trigger_retraining` | TriggerDagRunOperator | Triggers dag_retraining |
 
 **Validation rules:**
-- Images must be in a subfolder matching one of the 7 INRAE class names
+- Images must be in a subfolder matching one of the 7 class names
 - Accepted formats: `.jpg`, `.jpeg`, `.png`, `.webp`
 - Images in unknown subfolders are rejected and logged
 
@@ -174,6 +239,136 @@ The `terminate_ec2` task uses `trigger_rule="all_done"` — it always runs regar
 
 ---
 
+## Data Drift Detection
+
+### Why Drift Detection Matters
+
+In agricultural applications, the characteristics of incoming images can change over time due to:
+
+| Cause | Example | Impact on Model |
+|-------|---------|-----------------|
+| **Equipment changes** | New smartphone with different camera | Color calibration differs from training data |
+| **Seasonal variations** | Summer vs autumn lighting | Brightness/contrast patterns shift |
+| **Geographic expansion** | Images from new regions | Different soil/climate affects leaf appearance |
+| **User behavior** | Different photo angles or distances | Aspect ratios and compositions change |
+
+If these changes are significant, the model may perform poorly on the new data distribution — even if test metrics looked good at training time. **Drift detection acts as an early warning system** before model performance visibly degrades.
+
+### How It Works
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  ONE-TIME SETUP                                                         │
+│                                                                         │
+│  scripts/generate_reference_features.py                                 │
+│       │                                                                 │
+│       ▼                                                                 │
+│  Extract features from ALL training images (~2450 images)               │
+│       │                                                                 │
+│       ▼                                                                 │
+│  Save to S3: monitoring/reference_features.csv                          │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│  WEEKLY ANALYSIS (dag_monitoring)                                       │
+│                                                                         │
+│  1. Download reference_features.csv from S3                             │
+│       │                                                                 │
+│       ▼                                                                 │
+│  2. Extract features from NEW images in new-images/                     │
+│       │                                                                 │
+│       ▼                                                                 │
+│  3. Evidently compares distributions using statistical tests            │
+│     (Kolmogorov-Smirnov for numerical, chi-squared for categorical)     │
+│       │                                                                 │
+│       ▼                                                                 │
+│  4. Decision: drift_share > DRIFT_THRESHOLD ?                           │
+│       │                                                                 │
+│       ├── YES → send_drift_alert (with S3 report link)                  │
+│       └── NO  → check_model_performance (continue pipeline)             │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Extracted Features
+
+Evidently analyzes **8 numerical features** extracted from each image:
+
+| Feature | Description | Why It Matters |
+|---------|-------------|----------------|
+| `brightness` | Average pixel intensity (0-1) | Detects lighting condition changes |
+| `contrast` | Standard deviation of pixel values | Identifies image quality variations |
+| `aspect_ratio` | Width / Height | Reveals camera or crop changes |
+| `red_mean` | Average red channel value | Detects color calibration shifts |
+| `green_mean` | Average green channel value | Important for leaf color analysis |
+| `blue_mean` | Average blue channel value | Reveals white balance changes |
+| `saturation` | Color intensity (HSV) | Identifies washed-out or oversaturated images |
+| `file_size_kb` | Compressed file size | Proxy for image complexity/resolution |
+
+**Feature extraction code** is located in `dags/utils/drift_detection.py`.
+
+### Generated Reports
+
+Each drift analysis produces two outputs, stored on S3:
+
+| File | Location | Purpose |
+|------|----------|---------|
+| **HTML Report** | `s3://vitiscanpro-bucket/monitoring/evidently/reports/drift_report_YYYYMMDD_HHMMSS.html` | Interactive visualization for human review |
+| **JSON Results** | `s3://vitiscanpro-bucket/monitoring/evidently/reports/drift_results_YYYYMMDD_HHMMSS.json` | Machine-readable output for pipeline decisions |
+
+**Example JSON output:**
+```json
+{
+  "dataset_drift": true,
+  "drift_share": 0.43,
+  "number_of_columns": 8,
+  "number_of_drifted_columns": 3,
+  "drifted_features": ["brightness", "contrast", "blue_mean"],
+  "feature_drift_scores": {
+    "brightness": {"drift_detected": true, "drift_score": 0.002},
+    "contrast": {"drift_detected": true, "drift_score": 0.015},
+    "aspect_ratio": {"drift_detected": false, "drift_score": 0.234},
+    "red_mean": {"drift_detected": false, "drift_score": 0.456},
+    "green_mean": {"drift_detected": false, "drift_score": 0.321},
+    "blue_mean": {"drift_detected": true, "drift_score": 0.008},
+    "saturation": {"drift_detected": false, "drift_score": 0.187},
+    "file_size_kb": {"drift_detected": false, "drift_score": 0.543}
+  },
+  "reference_size": 2450,
+  "current_size": 127,
+  "timestamp": "2024-03-15T10:30:00Z"
+}
+```
+
+### Interpreting Results
+
+**In the HTML report:**
+
+| Indicator | Meaning |
+|-----------|---------|
+| 🟢 Green | No significant drift detected |
+| 🔴 Red | Drift detected (p-value < 0.05) |
+| **Drift Share** | Percentage of features showing drift (e.g., 0.43 = 43%) |
+
+**Recommended actions when drift is detected:**
+
+| Drift Share | Severity | Recommended Action |
+|-------------|----------|-------------------|
+| < 20% | Low | Monitor, likely normal variation |
+| 20-40% | Medium | Investigate source, check recent uploads |
+| > 40% | High | Pause ingestion, investigate before retraining |
+
+**Common causes and solutions:**
+
+| Symptom | Likely Cause | Solution |
+|---------|--------------|----------|
+| `brightness` + `contrast` drift | Lighting/weather change | Normal seasonal variation — monitor |
+| `blue_mean` drift only | White balance issue | Check camera settings on upload app |
+| `aspect_ratio` drift | New device type | Update preprocessing if needed |
+| `file_size_kb` drift | Compression change | Check upload pipeline settings |
+| All features drift | Major equipment change | Consider updating reference dataset |
+
+---
+
 ## How the DAGs Work Together
 
 The three DAGs form a **cascade pipeline** where each DAG is responsible for one distinct stage and triggers the next one:
@@ -201,22 +396,35 @@ This Airflow pipeline manages the **data and model lifecycle**. It does not inte
 vitiscan-airflow/
 ├── .github/
 │   └── workflows/
-│       └── ci.yaml              # CI/CD pipeline
+│       └── ci.yaml                       # CI/CD pipeline
 ├── dags/
-│   ├── config.py                # Centralized configuration
-│   ├── dag_monitoring.py        # Weekly watchdog DAG
-│   ├── dag_data_ingestion.py    # Dataset preparation DAG
-│   └── dag_retraining.py        # Model training and deployment DAG
+│   ├── config.py                         # Centralized configuration
+│   ├── dag_monitoring.py                 # Weekly watchdog DAG (+ drift detection)
+│   ├── dag_data_ingestion.py             # Dataset preparation DAG
+│   ├── dag_retraining.py                 # Model training and deployment DAG
+│   └── utils/                            # Utility modules
+│       ├── __init__.py
+│       └── drift_detection.py            # Evidently integration module
+├── scripts/
+│   └── generate_reference_features.py    # One-time reference dataset generator
 ├── config/
-│   └── airflow.cfg              # Airflow configuration overrides
-├── logs/                        # Airflow task logs (auto-generated)
-├── plugins/                     # Custom Airflow plugins (empty)
-├── .env.template                # Environment variables template
-├── docker-compose.yaml          # Docker Compose configuration
-├── Dockerfile                   # Custom Airflow image with dependencies
-├── requirements.txt             # Python dependencies
+│   └── airflow.cfg                       # Airflow configuration overrides
+├── logs/                                 # Airflow task logs (auto-generated)
+├── plugins/                              # Custom Airflow plugins (empty)
+├── .env.template                         # Environment variables template
+├── docker-compose.yaml                   # Docker Compose configuration
+├── Dockerfile                            # Custom Airflow image with dependencies
+├── requirements.txt                      # Python dependencies
 └── README.md
 ```
+
+**New files for drift detection:**
+
+| File | Purpose |
+|------|---------|
+| `dags/utils/__init__.py` | Makes `utils` a Python package |
+| `dags/utils/drift_detection.py` | Contains `extract_features()`, `run_drift_analysis()`, `upload_report()` |
+| `scripts/generate_reference_features.py` | One-time script to create reference dataset from training images |
 
 ---
 
@@ -245,7 +453,7 @@ git push
 ┌─────────────────────────────────────┐
 │  Job 2: Validate DAGs               │
 │                                     │
-│  • Installs Airflow                 │
+│  • Installs Airflow + Evidently     │
 │  • Parses all DAG files             │
 │  • Detects import errors            │
 │  • Validates DAG configuration      │
@@ -276,17 +484,17 @@ After pushing code, go to your GitHub repository → **Actions** tab:
 
 **Success:**
 ```
- CI Pipeline
-   ├── Lint Python Code (32s)
-   └── Validate Airflow DAGs (1m 12s)
+✓ CI Pipeline
+   ├── ✓ Lint Python Code (32s)
+   └── ✓ Validate Airflow DAGs (1m 12s)
 ```
 
 **Failure:**
 ```
- CI Pipeline
-   ├── Lint Python Code (8s)
+✗ CI Pipeline
+   ├── ✗ Lint Python Code (8s)
    │      └── Error: dags/dag_monitoring.py:42 — undefined name 'mlflwo'
-   └── Validate Airflow DAGs (skipped)
+   └── ○ Validate Airflow DAGs (skipped)
 ```
 
 ### Running Lint Locally
@@ -325,6 +533,8 @@ Copy `.env.template` to `.env` and fill in your values:
 cp .env.template .env
 ```
 
+### Core Variables
+
 | Variable | Description | Example |
 |---|---|---|
 | `AIRFLOW__CORE__FERNET_KEY` | Encryption key for sensitive data | (generate with Python) |
@@ -335,6 +545,14 @@ cp .env.template .env
 | `MLFLOW_TRACKING_URI` | MLflow server URL | `https://mouniat-vitiscanpro-hf.hf.space` |
 | `VITISCAN_API_DIAGNO_URL` | Diagnostic API URL | `https://mouniat-vitiscanpro-diagno-api.hf.space` |
 | `HF_TOKEN` | HuggingFace API token for deployment | `hf_...` |
+
+### Drift Detection Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `VITISCAN_DRIFT_DETECTION_ENABLED` | `true` | Enable/disable drift detection |
+| `VITISCAN_DRIFT_THRESHOLD` | `0.3` | Alert threshold (0.3 = 30% of features) |
+| `VITISCAN_MIN_IMAGES_FOR_DRIFT` | `50` | Minimum images required for analysis |
 
 **Generate a Fernet key:**
 ```bash
@@ -361,15 +579,42 @@ cp .env.template .env
 
 **3. Start Airflow**
 ```bash
+docker-compose build
 docker-compose up -d
 ```
 
-**4. Access Airflow UI**
+**4. Initialize drift detection reference (one-time setup)**
+```bash
+# Enter the scheduler container
+docker-compose exec airflow-scheduler bash
+
+# Verify Evidently is installed
+python -c "import evidently; print(f'Evidently version: {evidently.__version__}')"
+
+# Generate reference features from training dataset
+cd /opt/airflow/scripts
+python generate_reference_features.py
+
+# Expected output:
+# ======================================================================
+# VITISCAN — Reference Features Generator
+# ======================================================================
+# Listing training images...
+# - Found 2450 images
+# - Extracting features...
+# - Uploading to s3://vitiscanpro-bucket/monitoring/reference_features.csv...
+# - Successfully uploaded reference features!
+
+# Exit container
+exit
+```
+
+**5. Access Airflow UI**
 - Open http://localhost:8081
 - Login with credentials from `.env` (default: airflow/airflow)
 - Unpause `dag_monitoring` to start the pipeline
 
-**5. Check service status**
+**6. Check service status**
 ```bash
 docker-compose ps
 docker-compose logs -f airflow-scheduler
@@ -411,12 +656,18 @@ export AWS_ACCESS_KEY_ID=your_key
 export AWS_SECRET_ACCESS_KEY=your_secret
 export AWS_DEFAULT_REGION=eu-west-3
 export MLFLOW_TRACKING_URI=https://mouniat-vitiscanpro-hf.hf.space
+export VITISCAN_DRIFT_DETECTION_ENABLED=true
 ```
 
-**5. Start Airflow**
+**5. Generate reference features**
+```bash
+python scripts/generate_reference_features.py
+```
+
+**6. Start Airflow**
 ```bash
 airflow scheduler &
-airflow api-server --port 8080
+airflow webserver --port 8080
 ```
 
 ---
@@ -444,6 +695,16 @@ airflow dags list
 airflow dags list-runs --dag-id dag_monitoring
 ```
 
+**View drift reports:**
+```bash
+# List generated reports
+aws s3 ls s3://vitiscanpro-bucket/monitoring/evidently/reports/
+
+# Download latest HTML report for viewing
+aws s3 cp s3://vitiscanpro-bucket/monitoring/evidently/reports/drift_report_YYYYMMDD_HHMMSS.html ./
+open drift_report_*.html  # macOS
+```
+
 ---
 
 ## Infrastructure Overview
@@ -451,7 +712,8 @@ airflow dags list-runs --dag-id dag_monitoring
 | Component | Tool | Purpose |
 |---|---|---|
 | Pipeline orchestration | Apache Airflow 3.1.3 | Schedules and runs the 3 DAGs |
-| Data storage | AWS S3 (`vitiscanpro-bucket`) | Stores images and dataset metadata |
+| **Data drift detection** | **Evidently 0.4.33** | **Statistical analysis of image feature distributions** |
+| Data storage | AWS S3 (`vitiscanpro-bucket`) | Stores images, metadata, and drift reports |
 | Model training | AWS EC2 (`p3.2xlarge`) | GPU instance for ResNet18 training (simulated) |
 | Experiment tracking | MLflow (HuggingFace Spaces) | Logs metrics and manages model versions |
 | Model registry | MLflow Model Registry | Manages model stages (Staging/Production) |
@@ -462,21 +724,27 @@ airflow dags list-runs --dag-id dag_monitoring
 ```
 vitiscanpro-bucket/
 ├── new-images/
-│   └── <class_name>/          ← new labeled images uploaded by experts
+│   └── <class_name>/                     ← new labeled images uploaded by experts
 ├── datasets/
 │   ├── combined/
-│   │   ├── <class_name>/      ← current training dataset
+│   │   ├── <class_name>/                 ← current training dataset
 │   │   └── last_training_metadata.json
 │   └── archived/
-│       └── <class_name>/      ← excess images (never deleted)
-└── mlflow-artifacts/          ← model weights and artifacts
+│       └── <class_name>/                 ← excess images (never deleted)
+├── monitoring/
+│   ├── reference_features.csv            ← baseline features from training set
+│   └── evidently/
+│       └── reports/
+│           ├── drift_report_YYYYMMDD_HHMMSS.html
+│           └── drift_results_YYYYMMDD_HHMMSS.json
+└── mlflow-artifacts/                     ← model weights and artifacts
 ```
 
 ---
 
 ## Disease Classes
 
-The pipeline handles exactly **7 INRAE grape disease classes**:
+The pipeline handles exactly ** the grape disease classes**:
 
 | Class (scientific name) | Common name |
 |---|---|
@@ -496,6 +764,8 @@ Images uploaded to `new-images/` must be placed in a subfolder named exactly aft
 
 All pipeline configuration is centralized in `dags/config.py`. Values can be overridden via environment variables:
 
+### Retraining Triggers
+
 | Config | Environment Variable | Default |
 |---|---|---|
 | S3 bucket | `VITISCAN_S3_BUCKET` | `vitiscanpro-bucket` |
@@ -506,7 +776,63 @@ All pipeline configuration is centralized in `dags/config.py`. Values can be ove
 | Images per class target | `VITISCAN_TARGET_PER_CLASS` | `350` |
 | Min F1 improvement | `VITISCAN_MIN_F1_IMPROVEMENT` | `0.01` |
 
-See `dags/config.py` for the complete list.
+### Drift Detection
+
+| Config | Environment Variable | Default | Description |
+|---|---|---|---|
+| Enabled | `VITISCAN_DRIFT_DETECTION_ENABLED` | `true` | Enable/disable drift detection |
+| Threshold | `VITISCAN_DRIFT_THRESHOLD` | `0.3` | Alert if > 30% of features drift |
+| Min images | `VITISCAN_MIN_IMAGES_FOR_DRIFT` | `50` | Skip analysis if fewer images |
+
+**Adjusting drift sensitivity:**
+
+```bash
+# More sensitive (alert on 20% drift) — use for critical deployments
+VITISCAN_DRIFT_THRESHOLD=0.2
+
+# Less sensitive (alert on 50% drift) — use if too many false positives
+VITISCAN_DRIFT_THRESHOLD=0.5
+
+# Disable drift detection entirely
+VITISCAN_DRIFT_DETECTION_ENABLED=false
+```
+
+See `dags/config.py` for the complete list of configuration options.
+
+---
+
+## Troubleshooting
+
+### Drift Detection Issues
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| `No reference features found` | `reference_features.csv` missing on S3 | Run `scripts/generate_reference_features.py` |
+| `Not enough images for drift analysis` | < 50 images in `new-images/` | Normal — drift detection skipped |
+| `ModuleNotFoundError: evidently` | Docker image not rebuilt | `docker-compose build --no-cache` |
+| Reports not generated | Feature extraction error | Check logs: `docker-compose logs airflow-scheduler \| grep drift` |
+
+### General Airflow Issues
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| DAG not visible in UI | Syntax error in DAG file | Check `docker-compose logs airflow-scheduler` |
+| Task stuck in "queued" | Scheduler not running | `docker-compose restart airflow-scheduler` |
+| S3 access denied | Wrong AWS credentials | Check `.env` variables |
+| MLflow connection error | Wrong URI or server down | Verify `MLFLOW_TRACKING_URI` |
+
+### Viewing Logs
+
+```bash
+# All scheduler logs
+docker-compose logs -f airflow-scheduler
+
+# Filter for drift-related logs
+docker-compose logs airflow-scheduler | grep -i drift
+
+# Filter for specific DAG
+docker-compose logs airflow-scheduler | grep dag_monitoring
+```
 
 ---
 

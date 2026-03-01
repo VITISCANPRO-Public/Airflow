@@ -49,10 +49,10 @@ from datetime import datetime
 # Third-party
 import numpy as np
 import pandas as pd
-from PIL import Image
 from evidently import ColumnMapping
 from evidently.metric_preset import DataDriftPreset, DataQualityPreset
 from evidently.report import Report
+from PIL import Image
 
 # ══════════════════════════════════════════════════════════════════════════════
 # LOGGER

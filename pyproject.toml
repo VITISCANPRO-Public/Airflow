@@ -1,0 +1,36 @@
+[project]
+name = "vitiscan-airflow"
+version = "1.0.0"
+description = "MLOps pipeline for Vitiscan grape leaf disease classification"
+requires-python = ">=3.11"
+
+[tool.ruff]
+# Files to analyze
+include = ["dags/**/*.py", "scripts/**/*.py"]
+
+# Activated rules
+lint.select = [
+    "E",   # Style error (pycodestyle)
+    "F",   # Logic error (pyflakes)
+    "I",   # Import sorting (lint.isort)
+    "W",   # Warnings
+]
+
+# Max line length
+line-length = 100
+
+# Auto-fix activated
+fix = true
+
+[tool.ruff.lint.isort]
+# Locals modules
+known-first-party = ["config", "utils"]
+
+# Devide import into sections
+section-order = [
+    "future",
+    "standard-library",
+    "third-party",
+    "first-party",
+    "local-folder",
+]

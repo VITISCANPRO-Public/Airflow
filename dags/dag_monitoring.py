@@ -72,7 +72,6 @@ from config import (
     S3_REFERENCE_FEATURES_KEY,
     VALID_EXTENSIONS,
 )
-
 from utils.drift_detection import (
     check_drift_detected,
     extract_image_features,

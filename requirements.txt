@@ -28,3 +28,6 @@ scikit-learn==1.4.0
 
 # Image processing for feature extraction
 Pillow==10.2.0
+
+# Import verification for ruff lint
+ruff>=0.4.0

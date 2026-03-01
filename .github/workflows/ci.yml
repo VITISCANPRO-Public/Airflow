@@ -29,40 +29,22 @@ jobs:
   # ════════════════════════════════════════════════════════════════════════════
   # JOB 1: LINT
   # ════════════════════════════════════════════════════════════════════════════
-  # 
-  # Linting = automatic code analysis to detect:
-  #   - Syntax errors (if x = 5 instead of if x == 5)
-  #   - Undefined variables (typos in variable names)
-  #   - Unused imports (import pandas but never use it)
-  #   - Style issues (lines too long, bad indentation)
-  #
-  # We use "ruff" — a modern, fast Python linter written in Rust.
-  # It's 10-100x faster than flake8/pylint and includes their rules.
-  #
   lint:
     name: Lint Python Code
     runs-on: ubuntu-latest
     
     steps:
-      # Step 1: Download the repository code
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Step 2: Install Python
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # Step 3: Install the linter
       - name: Install ruff
         run: pip install ruff
 
-      # Step 4: Run the linter on the dags/ folder
-      # --select E,F,I = check for:
-      #   E = pycodestyle errors (style issues)
-      #   F = pyflakes errors (undefined names, unused imports)
-      #   I = isort errors (import order)
       - name: Run ruff linter
         run: |
           echo "Running linter on dags/ folder..."
@@ -72,52 +54,37 @@ jobs:
   # ════════════════════════════════════════════════════════════════════════════
   # JOB 2: VALIDATE DAGS
   # ════════════════════════════════════════════════════════════════════════════
-  #
-  # This job verifies that Airflow can parse the DAG files.
-  # A DAG might have valid Python syntax but still fail in Airflow if:
-  #   - Import errors (missing dependency)
-  #   - Invalid DAG configuration (wrong parameter types)
-  #   - Circular dependencies between tasks
-  #
-  # We use "airflow dags list" which parses all DAGs and reports errors.
-  #
   validate-dags:
     name: Validate Airflow DAGs
     runs-on: ubuntu-latest
-    needs: lint  # Only run if lint passes (fail fast)
+    needs: lint
     
     steps:
-      # Step 1: Download the repository code
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Step 2: Install Python
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # Step 3: Install Airflow and dependencies
-      # We use --constraint to ensure compatible versions
-      - name: Install Airflow and dependencies
+      # ════════════════════════════════════════════════════════════════════════
+      # FIX: Install from requirements.txt WITHOUT external constraints
+      # The old constraints file was for Airflow 2.9.0, incompatible with 3.1.3
+      # ════════════════════════════════════════════════════════════════════════
+      - name: Install dependencies
         run: |
-          pip install "apache-airflow==3.1.3" \
-            --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.9.0/constraints-3.11.txt"
+          pip install --upgrade pip
           pip install -r requirements.txt
 
-      # Step 4: Initialize Airflow (creates config and database)
-      # We use SQLite for CI (no need for PostgreSQL)
-      # IMPORTANT: SQLite requires ABSOLUTE path, not relative
       - name: Initialize Airflow
         run: |
           export AIRFLOW_HOME=${{ github.workspace }}
           export AIRFLOW__CORE__DAGS_FOLDER=${{ github.workspace }}/dags
           export AIRFLOW__CORE__LOAD_EXAMPLES=False
           export AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=sqlite:///${{ github.workspace }}/airflow.db
-          airflow db init
+          airflow db migrate
 
-      # Step 5: Validate DAGs by listing them
-      # If any DAG has errors, this command fails and shows the error
       - name: Validate DAG syntax
         run: |
           export AIRFLOW_HOME=${{ github.workspace }}
@@ -129,14 +96,13 @@ jobs:
           airflow dags list
           
           echo ""
-          echo "DAG details:"
+          echo "Checking for import errors..."
           airflow dags list-import-errors || true
           
           echo ""
           echo "All DAGs validated successfully!"
 
-      # Step 6: Show DAG structure (optional, for visibility)
-      - name: Show DAG tasks
+      - name: Show DAG structure
         run: |
           export AIRFLOW_HOME=${{ github.workspace }}
           export AIRFLOW__CORE__DAGS_FOLDER=${{ github.workspace }}/dags

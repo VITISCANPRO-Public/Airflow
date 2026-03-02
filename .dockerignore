@@ -1,0 +1,22 @@
+# Git
+.git/
+.github/
+.gitattributes
+.gitignore
+
+# Secrets
+.env
+.envrc
+
+# Documentation
+README.md
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+

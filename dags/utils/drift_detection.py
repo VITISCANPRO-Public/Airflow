@@ -49,7 +49,7 @@ from datetime import datetime
 # Third-party
 import numpy as np
 import pandas as pd
-from evidently import ColumnMapping
+from evidently.pipeline.column_mapping import ColumnMapping
 from evidently.metric_preset import DataDriftPreset, DataQualityPreset
 from evidently.report import Report
 from PIL import Image

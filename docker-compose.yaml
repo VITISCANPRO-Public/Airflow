@@ -75,6 +75,10 @@ x-airflow-common:
     # WARNING: Use this ONLY for quick checks. For production, build a custom image.
     _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
     
+    # ── Python Bytecode Configuration ─────────────────────────────────────────
+    # Disable .pyc file generation to avoid cache issues during development
+    PYTHONDONTWRITEBYTECODE: "1"
+    
   volumes:
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
     - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs

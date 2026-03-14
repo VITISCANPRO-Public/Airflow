@@ -5,7 +5,7 @@ This package contains helper functions for:
 - drift_detection: Evidently-based data drift monitoring
 """
 
-from utils.drift_detection import (
+from .drift_detection import (
     check_drift_detected,
     extract_image_features,
     generate_drift_report,

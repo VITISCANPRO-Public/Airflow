@@ -4,4 +4,4 @@ airflow.cfg
 .env
 logs
 *.pem
-
+**/.DS_Store

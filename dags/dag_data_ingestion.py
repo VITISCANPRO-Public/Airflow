@@ -46,7 +46,7 @@ from airflow.operators.python import PythonOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
 # Local imports
-from config import (
+from dags.config import (
     S3_ARCHIVED_DIR,
     S3_BUCKET,
     S3_COMBINED_DIR,

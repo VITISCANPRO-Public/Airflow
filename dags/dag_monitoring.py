@@ -53,7 +53,7 @@ from airflow.operators.python import BranchPythonOperator, PythonOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
 # Local imports
-from config import (
+from dags.config import (
     DRIFT_DETECTION_ENABLED,
     DRIFT_THRESHOLD,
     F1_THRESHOLD,
@@ -72,7 +72,7 @@ from config import (
     S3_REFERENCE_FEATURES_KEY,
     VALID_EXTENSIONS,
 )
-from utils.drift_detection import (
+from dags.utils.drift_detection import (
     check_drift_detected,
     extract_image_features,
     generate_drift_report,

@@ -54,7 +54,7 @@ from airflow.operators.empty import EmptyOperator
 from airflow.operators.python import BranchPythonOperator, PythonOperator
 
 # Local imports
-from config import (
+from dags.config import (
     API_DIAGNO_URL,
     EC2_AMI_ID,
     EC2_INSTANCE_TYPE,

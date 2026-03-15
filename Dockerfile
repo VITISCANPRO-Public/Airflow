@@ -11,7 +11,7 @@
 # ══════════════════════════════════════════════════════════════════════════════
 
 # Base image — must match the version in docker-compose.yaml
-FROM apache/airflow:3.1.3
+FROM apache/airflow:2.10.4-python3.11
 
 
 # Copy and install Python dependencies

@@ -25,7 +25,7 @@ S3_BUCKET = os.environ.get("VITISCAN_S3_BUCKET", "vitiscanpro-bucket")
 S3_NEW_IMAGES_DIR = "new-images/"
 
 # Directory for the combined dataset (validated and balanced images)
-S3_COMBINED_DIR = "datasets/combined/"
+S3_COMBINED_DIR = "datasets/combined/train/"
 
 # Metadata file for the last training run
 S3_METADATA_KEY = "datasets/combined/last_training_metadata.json"
@@ -76,13 +76,14 @@ API_DIAGNO_URL = os.environ.get(
 
 # Minimum number of new images to trigger retraining
 # If >= MIN_NEW_IMAGES images are available in new-images/, ingestion is triggered
-MIN_NEW_IMAGES = int(os.environ.get("VITISCAN_MIN_NEW_IMAGES", "200"))
+# Threshold : 200 pictures, here 5 for the dag demo
+MIN_NEW_IMAGES = int(os.environ.get("VITISCAN_MIN_NEW_IMAGES", "5"))
+
 
 # Maximum number of days without retraining
 # If last training was more than MAX_DAYS_WITHOUT_RETRAINING days ago,
 # ingestion is triggered even if there aren't enough new images
 MAX_DAYS_WITHOUT_RETRAINING = int(os.environ.get("VITISCAN_MAX_DAYS", "60"))
-
 
 
 # MODEL PERFORMANCE THRESHOLDS (dag_monitoring) ════════════════════════

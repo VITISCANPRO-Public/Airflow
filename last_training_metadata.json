@@ -1,0 +1,16 @@
+{
+  "last_training_date": "2026-01-15T10:00:00Z",
+  "total_images": 2450,
+  "images_per_class": {
+    "colomerus_vitis": 350,
+    "elsinoe_ampelina": 350,
+    "erysiphe_necator": 350,
+    "guignardia_bidwellii": 350,
+    "healthy": 350,
+    "phaeomoniella_chlamydospora": 350,
+    "plasmopara_viticola": 350
+  },
+  "model_version": "vitiscan-resnet18",
+  "f1_score": 0.982,
+  "accuracy": 0.983
+}

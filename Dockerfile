@@ -19,5 +19,5 @@ COPY requirements.txt /requirements.txt
 
 # Switch to airflow user (non-root) for security
 USER airflow
-RUN pip install --user --no-cache-dir -r /requirements.txt
+RUN pip install --no-cache-dir -r /requirements.txt
 
